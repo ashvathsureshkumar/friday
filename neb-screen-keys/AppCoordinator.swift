@@ -19,7 +19,7 @@ final class AppCoordinator {
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "aec926de-022c-47ac-8ae3-ddcd7febf68c") {
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
         let grok = GrokClient(apiKey: grokApiKey)
         let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
         self.nebula = nebulaClient
