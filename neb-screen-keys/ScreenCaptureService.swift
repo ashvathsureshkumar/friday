@@ -19,8 +19,19 @@ final class ScreenCaptureService {
         return await captureMainDisplay()
     }
     
+    /// Capture full screen (for chat context - includes our app)
+    func captureFullScreen() async -> ScreenFrame? {
+        Logger.shared.log(.capture, "🎬 captureFullScreen() called")
+        guard #available(macOS 14.0, *) else {
+            Logger.shared.log(.capture, "❌ macOS version < 14.0, capture not available")
+            return nil
+        }
+        
+        return await captureMainDisplay(excludeOwnApp: false)
+    }
+    
     @available(macOS 14.0, *)
-    private func captureMainDisplay() async -> ScreenFrame? {
+    private func captureMainDisplay(excludeOwnApp: Bool = true) async -> ScreenFrame? {
         var stream: SCStream?
         do {
             Logger.shared.log(.capture, "📡 Requesting SCShareableContent...")
@@ -33,10 +44,11 @@ final class ScreenCaptureService {
             
             Logger.shared.log(.capture, "Capturing main display: \(mainDisplay.width)x\(mainDisplay.height)")
             
-            // Get our app to exclude it
+            // Get our app to exclude it (unless capturing full screen for chat)
             let ourBundleID = Bundle.main.bundleIdentifier
             var excludedApps: [SCRunningApplication] = []
-            if let bundleID = ourBundleID,
+            if excludeOwnApp,
+               let bundleID = ourBundleID,
                let ourApp = content.applications.first(where: { $0.bundleIdentifier == bundleID }) {
                 excludedApps.append(ourApp)
             }
