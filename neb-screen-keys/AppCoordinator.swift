@@ -12,12 +12,20 @@ final class AppCoordinator {
     private let keystrokeMonitor = KeystrokeMonitor()
     private let captureService = ScreenCaptureService()
     private let overlay = OverlayController()
+    private let chatOverlay = ChatOverlayController()
     private let contextBuffer = ContextBufferService()
     private let annotationBuffer = AnnotationBufferService()
 
     private let annotator: AnnotatorService
     private let executor: ExecutorService
     private let nebula: NebulaClient
+    private let grok: GrokClient
+    private var chatHistory: [GrokMessage] = []
+
+    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
+        let grokClient = GrokClient(apiKey: grokApiKey)
     private let executionAgent: ExecutionAgent
 
     // MARK: - Producer Flow State
@@ -39,7 +47,10 @@ final class AppCoordinator {
         
         let grok = GrokClient(apiKey: grokApiKey)
         let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
+        self.grok = grokClient
         self.nebula = nebulaClient
+        self.annotator = AnnotatorService(grok: grokClient, capture: captureService)
+        self.executor = ExecutorService(grok: grokClient, nebula: nebulaClient)
         self.annotator = AnnotatorService(grok: grok, capture: captureService)
         self.executor = ExecutorService(grok: grok, nebula: nebulaClient)
         self.executionAgent = ExecutionAgent(stateStore: stateStore, overlay: overlay, executor: executor)
@@ -49,6 +60,10 @@ final class AppCoordinator {
             if let taskId = self?.stateStore.currentTaskId {
                 self?.stateStore.decline(taskId: taskId)
             }
+        }
+
+        chatOverlay.onSendMessage = { [weak self] message in
+            self?.handleChatMessage(message)
         }
     }
 
@@ -67,6 +82,11 @@ final class AppCoordinator {
             self.eventMonitor.onShortcut = { [weak self] shortcut in
                 self?.handleProducerEvent(shortcut: shortcut)
             }
+            self.eventMonitor.onChatToggle = { [weak self] in
+                DispatchQueue.main.async {
+                    self?.chatOverlay.toggle()
+                }
+            }
             self.eventMonitor.start()
 
             self.keystrokeMonitor.onKeyEvent = { [weak self] in
@@ -74,6 +94,7 @@ final class AppCoordinator {
             }
             self.keystrokeMonitor.start()
 
+            // self.maybeAnnotate(reason: "launch")  // Disabled for testing
             // CONSUMER FLOW: Start the periodic AI processing loop
             self.startAnnotatorLoop()
             
@@ -319,6 +340,62 @@ final class AppCoordinator {
                 Logger.shared.log(.nebula, "Execution plan stored successfully")
             }
         }
+    }
+
+    private func handleChatMessage(_ message: String) {
+        chatHistory.append(GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: message)]))
+
+        let systemPrompt = """
+        You are a helpful AI assistant. Be concise and helpful in your responses.
+        """
+
+        var messages = [GrokMessage(role: "system", content: [GrokMessagePart(type: "text", text: systemPrompt)])]
+        messages.append(contentsOf: chatHistory)
+
+        let request = GrokRequest(model: "grok-2-latest", messages: messages, attachments: nil, stream: false)
+
+        grok.createResponse(request) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure(let error):
+                    self?.chatOverlay.addMessage(role: "assistant", content: "Error: \(error.localizedDescription)")
+                case .success(let data):
+                    if let response = self?.parseGrokResponse(data) {
+                        self?.chatHistory.append(GrokMessage(role: "assistant", content: [GrokMessagePart(type: "text", text: response)]))
+                        self?.chatOverlay.addMessage(role: "assistant", content: response)
+                    } else {
+                        self?.chatOverlay.addMessage(role: "assistant", content: "Failed to parse response")
+                    }
+                }
+            }
+        }
+    }
+
+    private func parseGrokResponse(_ data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+
+        // Handle x.ai responses format
+        if let output = json["output"] as? [[String: Any]] {
+            for item in output {
+                if let content = item["content"] as? [[String: Any]] {
+                    for part in content {
+                        if let text = part["text"] as? String {
+                            return text
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: try choices format
+        if let choices = json["choices"] as? [[String: Any]],
+           let first = choices.first,
+           let message = first["message"] as? [String: Any],
+           let content = message["content"] as? String {
+            return content
+        }
+
+        return nil
     }
 }
 
