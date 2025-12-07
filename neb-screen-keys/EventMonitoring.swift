@@ -44,7 +44,6 @@ final class KeystrokeMonitor {
                                        options: .defaultTap,
                                        eventsOfInterest: mask,
                                        callback: { _, type, event, refcon in
-                                           guard let event = event else { return nil }
                                            if type == .keyDown, let refcon = refcon {
                                                let monitor = Unmanaged<KeystrokeMonitor>.fromOpaque(refcon).takeUnretainedValue()
                                                monitor.onKeyEvent?()
