@@ -80,11 +80,38 @@ final class GrokClient {
     private let session: URLSession
 
     init(apiKey: String, session: URLSession = .shared) {
-        self.apiKey = apiKey
+        // Strip any "Bearer " prefix if accidentally included
+        let cleanKey = apiKey.replacingOccurrences(of: "Bearer ", with: "")
+        self.apiKey = cleanKey
         self.session = session
+        
+        // Validation and logging
+        if cleanKey.isEmpty {
+            Logger.shared.log(.system, "⚠️ WARNING: GrokClient initialized with EMPTY API key!")
+            Logger.shared.log(.system, "   Check that GROK_API_KEY is set in your .env file")
+            Logger.shared.log(.system, "   Expected format: GROK_API_KEY=xai-...")
+        } else if !cleanKey.hasPrefix("xai-") {
+            Logger.shared.log(.system, "⚠️ WARNING: GrokClient API key does not start with 'xai-'")
+            Logger.shared.log(.system, "   Key format: \(cleanKey.prefix(10))...")
+        } else {
+            Logger.shared.log(.system, "✓ GrokClient initialized with valid API key format")
+        }
     }
 
     func createResponse(_ payload: ChatRequest, completion: @escaping (Result<Data, Error>) -> Void) {
+        // Validate API key before making request
+        if apiKey.isEmpty {
+            Logger.shared.log(.annotator, "❌ ERROR: Cannot make Grok API request - API key is EMPTY")
+            Logger.shared.log(.annotator, "   Check that GROK_API_KEY is set in ~/.config/neb-screen-keys/.env or .env")
+            let error = NSError(
+                domain: "grok",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "Missing GROK_API_KEY - check .env file"]
+            )
+            completion(.failure(error))
+            return
+        }
+        
         guard let url = URL(string: "https://api.x.ai/v1/chat/completions") else {
             completion(.failure(NSError(domain: "grok", code: -1, userInfo: [NSLocalizedDescriptionKey: "Bad URL"])))
             return
@@ -94,6 +121,9 @@ final class GrokClient {
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Log headers for debugging (without exposing full key)
+        Logger.shared.log(.annotator, "Request headers: Content-Type=application/json, Authorization=Bearer \(apiKey.prefix(10))...")
 
         do {
             let encoder = JSONEncoder()

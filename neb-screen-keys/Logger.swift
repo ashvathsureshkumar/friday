@@ -14,6 +14,7 @@ enum LogCategory: String {
     case nebula = "Nebula"
     case flow = "Flow"
     case capture = "Capture"
+    case stream = "Stream"
     case system = "System"
 }
 

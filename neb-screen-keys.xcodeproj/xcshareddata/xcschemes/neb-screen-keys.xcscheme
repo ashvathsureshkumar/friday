@@ -77,17 +77,17 @@
       <EnvironmentVariables>
          <EnvironmentVariable
             key = "GROK_API_KEY"
-            value = ""
+            value = "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx"
             isEnabled = "NO">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "NEBULA_API_KEY"
-            value = ""
+            value = "neb_nMIP7L236JkymXVVPRJcBA==.aejAQwwCDTPxOduAWnyoE5AzSCHTog9bSJP9OudzHb0="
             isEnabled = "NO">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "NEBULA_COLLECTION_ID"
-            value = ""
+            value = "cd8e4a41-de13-46ac-8229-81c84b96dab3"
             isEnabled = "NO">
          </EnvironmentVariable>
       </EnvironmentVariables>

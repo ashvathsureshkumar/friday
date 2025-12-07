@@ -13,24 +13,36 @@ final class AppCoordinator {
     private let captureService = ScreenCaptureService()
     private let overlay = OverlayController()
     private let contextBuffer = ContextBufferService()
+    private let annotationBuffer = AnnotationBufferService()
 
     private let annotator: AnnotatorService
     private let executor: ExecutorService
     private let nebula: NebulaClient
+    private let executionAgent: ExecutionAgent
 
     // MARK: - Producer Flow State
     private var lastScreenCaptureTime: Date?
     private let screenCaptureThrottleInterval: TimeInterval = 0.5 // 500ms throttle
     private var consumerTask: Task<Void, Never>?
+    private var nebulaConsumerTask: Task<Void, Never>?
+    private var executionConsumerTask: Task<Void, Never>?
 
-    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
+    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_nMIP7L236JkymXVVPRJcBA==.aejAQwwCDTPxOduAWnyoE5AzSCHTog9bSJP9OudzHb0=",
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "cd8e4a41-de13-46ac-8229-81c84b96dab3"){
+        
+        // Log environment variable status for debugging
+        Logger.shared.log(.system, "AppCoordinator initialization:")
+        Logger.shared.log(.system, "  GROK_API_KEY: \(grokApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(grokApiKey.prefix(10))...)")")
+        Logger.shared.log(.system, "  NEBULA_API_KEY: \(nebulaApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(nebulaApiKey.prefix(10))...)")")
+        Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: \(nebulaCollection.isEmpty ? "❌ MISSING" : "✓ Present")")
+        
         let grok = GrokClient(apiKey: grokApiKey)
         let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
         self.nebula = nebulaClient
         self.annotator = AnnotatorService(grok: grok, capture: captureService)
         self.executor = ExecutorService(grok: grok, nebula: nebulaClient)
+        self.executionAgent = ExecutionAgent(stateStore: stateStore, overlay: overlay, executor: executor)
 
         overlay.onAccept = { [weak self] in self?.executeCurrentTask() }
         overlay.onDecline = { [weak self] in
@@ -64,6 +76,12 @@ final class AppCoordinator {
 
             // CONSUMER FLOW: Start the periodic AI processing loop
             self.startAnnotatorLoop()
+            
+            // CONSUMER A: Start Nebula consumer (stores all annotations)
+            self.startNebulaConsumer()
+            
+            // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
+            self.startExecutionAgentConsumer()
 
             // Initial screen capture on launch
             self.captureAndBuffer(reason: "launch")
@@ -162,38 +180,83 @@ final class AppCoordinator {
         case .failure(let error):
             Logger.shared.log(.flow, "Annotation failed: \(error.localizedDescription)")
         case .success(let context):
-            let taskId = self.stableTaskId(for: context)
-
-            if stateStore.wasDeclined(taskId) {
-                Logger.shared.log(.flow, "Task was declined previously, skipping. ID: \(taskId.prefix(8))...")
-                return
-            }
-            if stateStore.wasCompleted(taskId) {
-                Logger.shared.log(.flow, "Task was completed previously, skipping. ID: \(taskId.prefix(8))...")
-                return
-            }
-
-            // Store comprehensive context including keystrokes to Nebula
-            self.pushToNebula(context: context, taskId: taskId, keystrokes: batch.keystrokes, timestamp: batch.timestamp)
-
-            let isNew = stateStore.updateCurrent(taskId: taskId)
-            if isNew {
-                Logger.shared.log(.flow, "New task detected: '\(context.taskLabel)' [ID: \(taskId.prefix(8))...]")
+            // Simply publish to annotation buffer - consumers will handle the rest
+            await self.annotationBuffer.publish(context)
+        }
+    }
+    
+    // MARK: - Annotation Buffer Consumers
+    
+    /// Consumer A: Nebula - Stores all annotations to memory
+    private func startNebulaConsumer() {
+        Logger.shared.log(.stream, "Starting Nebula consumer...")
+        
+        nebulaConsumerTask = Task { [weak self] in
+            guard let self = self else { return }
+            
+            // Subscribe to annotation stream
+            let stream = await self.annotationBuffer.makeStream()
+            
+            // Process each annotation
+            for await annotation in stream {
+                Logger.shared.log(.nebula, "Nebula consumed event: '\(annotation.taskLabel)'")
                 
-                // Show decision panel with task label
-                let decisionText = "Execute automation for:\n\(context.taskLabel)"
-                overlay.showDecision(text: decisionText)
+                // Generate task ID for metadata
+                let taskId = self.stableTaskId(for: annotation)
                 
-                // Generate and show AI suggestion preview asynchronously
-                overlay.showSuggestion(text: "Thinking...")
-                executor.generateSuggestionPreview(task: context) { [weak self] suggestion in
-                    DispatchQueue.main.async {
-                        self?.overlay.showSuggestion(text: suggestion)
+                // Build comprehensive content
+                var contentParts: [String] = []
+                contentParts.append("Task: \(annotation.taskLabel)")
+                contentParts.append("App: \(annotation.app)")
+                contentParts.append("Window: \(annotation.windowTitle)")
+                contentParts.append("\nAnalysis Summary: \(annotation.summary)")
+                contentParts.append("Confidence: \(String(format: "%.2f", annotation.confidence))")
+                
+                let fullContent = contentParts.joined(separator: "\n")
+                
+                // Comprehensive metadata for semantic search
+                let metadata: [String: Any] = [
+                    "task_id": taskId,
+                    "task_label": annotation.taskLabel,
+                    "app": annotation.app,
+                    "window_title": annotation.windowTitle,
+                    "confidence": annotation.confidence,
+                    "timestamp": annotation.timestamp.timeIntervalSince1970,
+                    "type": "task_detection"
+                ]
+                
+                Logger.shared.log(.nebula, "Storing context to Nebula: \(fullContent.count) chars")
+                
+                self.nebula.addMemory(content: fullContent, metadata: metadata) { result in
+                    if case .failure(let error) = result {
+                        Logger.shared.log(.nebula, "Nebula addMemory error: \(error.localizedDescription)")
+                    } else {
+                        Logger.shared.log(.nebula, "Context stored successfully for task \(taskId.prefix(8))...")
                     }
                 }
-            } else {
-                Logger.shared.log(.flow, "Task already known, overlay remains visible")
             }
+            
+            Logger.shared.log(.stream, "Nebula consumer stopped")
+        }
+    }
+    
+    /// Consumer B: Execution Agent - Determines if automation should be triggered
+    private func startExecutionAgentConsumer() {
+        Logger.shared.log(.stream, "Starting Execution Agent consumer...")
+        
+        executionConsumerTask = Task { [weak self] in
+            guard let self = self else { return }
+            
+            // Subscribe to annotation stream
+            let stream = await self.annotationBuffer.makeStream()
+            
+            // Process each annotation
+            for await annotation in stream {
+                // Delegate to execution agent
+                self.executionAgent.processAnnotation(annotation)
+            }
+            
+            Logger.shared.log(.stream, "Execution Agent consumer stopped")
         }
     }
 
@@ -244,61 +307,6 @@ final class AppCoordinator {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
-    private func pushToNebula(context: AnnotatedContext, taskId: String, keystrokes: String, timestamp: Date) {
-        // Build comprehensive content with ALL curated information
-        var contentParts: [String] = []
-        
-        // Task identification
-        contentParts.append("Task: \(context.taskLabel)")
-        contentParts.append("App: \(context.app)")
-        contentParts.append("Window: \(context.windowTitle)")
-        
-        // AI Analysis
-        contentParts.append("\nAnalysis Summary: \(context.summary)")
-        contentParts.append("Confidence: \(String(format: "%.2f", context.confidence))")
-        
-        // User Activity Context
-        if !keystrokes.isEmpty {
-            let keystrokeCount = keystrokes.count
-            let hasShortcuts = keystrokes.contains("[SHORTCUT:")
-            let shortcuts = keystrokes.components(separatedBy: "[SHORTCUT:").dropFirst()
-                .compactMap { $0.components(separatedBy: "]").first }
-            
-            contentParts.append("\nUser Activity:")
-            contentParts.append("- Keystroke intensity: \(keystrokeCount) characters")
-            if hasShortcuts {
-                contentParts.append("- Shortcuts used: \(shortcuts.joined(separator: ", "))")
-            }
-            contentParts.append("- Activity pattern: \(keystrokes)")
-        }
-        
-        let fullContent = contentParts.joined(separator: "\n")
-        
-        // Comprehensive metadata for semantic search
-        let metadata: [String: Any] = [
-            "task_id": taskId,
-            "task_label": context.taskLabel,
-            "app": context.app,
-            "window_title": context.windowTitle,
-            "confidence": context.confidence,
-            "timestamp": context.timestamp.timeIntervalSince1970,
-            "buffer_timestamp": timestamp.timeIntervalSince1970,
-            "keystroke_count": keystrokes.count,
-            "has_shortcuts": keystrokes.contains("[SHORTCUT:"),
-            "type": "task_detection"
-        ]
-        
-        Logger.shared.log(.nebula, "Storing comprehensive context to Nebula: \(fullContent.count) chars")
-        
-        nebula.addMemory(content: fullContent, metadata: metadata) { result in
-            if case .failure(let error) = result {
-                Logger.shared.log(.nebula, "Nebula addMemory error: \(error.localizedDescription)")
-            } else {
-                Logger.shared.log(.nebula, "Context stored successfully for task \(taskId.prefix(8))...")
-            }
-        }
-    }
-
     private func pushExecutionResult(taskId: String, plan: String) {
         let metadata: [String: Any] = [
             "task_id": taskId,
@@ -306,7 +314,9 @@ final class AppCoordinator {
         ]
         nebula.addMemory(content: plan, metadata: metadata) { result in
             if case .failure(let error) = result {
-                print("Nebula addMemory (execution) error: \(error.localizedDescription)")
+                Logger.shared.log(.nebula, "Nebula addMemory (execution) error: \(error.localizedDescription)")
+            } else {
+                Logger.shared.log(.nebula, "Execution plan stored successfully")
             }
         }
     }

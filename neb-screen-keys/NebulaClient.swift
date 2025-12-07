@@ -15,7 +15,7 @@ struct NebulaMemoryRequest: Codable {
     let engram_type: String         // Required field for memory type
     
     enum CodingKeys: String, CodingKey {
-        case content
+        case content = "raw_text"
         case metadata
         case collection_ref
         case engram_type
@@ -189,8 +189,8 @@ final class NebulaClient {
             if let httpResponse = response as? HTTPURLResponse {
                 Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
                 
-                // Accept 200 and 201 as success
-                if httpResponse.statusCode != 200 && httpResponse.statusCode != 201 {
+                // Accept all 2xx status codes as success (200-299)
+                if !(200...299).contains(httpResponse.statusCode) {
                     if let data = data, let errorBody = String(data: data, encoding: .utf8) {
                         let preview = errorBody.count > 300 ? String(errorBody.prefix(300)) + "..." : errorBody
                         Logger.shared.log(.nebula, "Error (\(httpResponse.statusCode)): \(preview)")
@@ -201,6 +201,11 @@ final class NebulaClient {
                         completion(.failure(error))
                         return
                     }
+                }
+                
+                // Special logging for 202 Accepted (async processing)
+                if httpResponse.statusCode == 202 {
+                    Logger.shared.log(.nebula, "✅ Memory queued successfully (Async processing)")
                 }
             }
             
@@ -237,7 +242,8 @@ final class NebulaClient {
             if let httpResponse = response as? HTTPURLResponse {
                 Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
                 
-                if httpResponse.statusCode != 200 {
+                // Accept all 2xx status codes as success (200-299)
+                if !(200...299).contains(httpResponse.statusCode) {
                     if let data = data, let errorBody = String(data: data, encoding: .utf8) {
                         let preview = errorBody.count > 300 ? String(errorBody.prefix(300)) + "..." : errorBody
                         Logger.shared.log(.nebula, "Error (\(httpResponse.statusCode)): \(preview)")
