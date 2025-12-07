@@ -73,4 +73,3 @@ private final class OneShotFrameGrabber: NSObject, SCStreamOutput {
         }
     }
 }
-
