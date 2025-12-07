@@ -225,6 +225,15 @@ final class AppCoordinator {
     /// Process a consumed buffer batch through the annotator
     private func processBufferBatch(_ batch: BufferBatch) async {
         Logger.shared.log(.flow, "Sending batch to annotator...")
+        
+        // Save screenshot to assets for every annotation (debugging)
+        if let frame = batch.screenFrame {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
+            let timestamp = formatter.string(from: batch.timestamp)
+            let reason = "annotation_\(timestamp)"
+            self.saveScreenshot(frame.image, reason: reason)
+        }
 
         let result = await self.annotator.annotate(batch: batch)
         switch result {
@@ -430,21 +439,14 @@ final class AppCoordinator {
     
     // MARK: - Debug Helpers
     
-    /// Save screenshot to desktop folder for debugging
+    /// Save screenshot to desktop folder and assets folder for debugging
     private func saveScreenshot(_ image: NSImage, reason: String) {
         Task {
-            let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
-            let folderURL = desktopURL.appendingPathComponent("neb-screen-captures")
-            
-            // Create folder if it doesn't exist
-            try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            
             // Generate filename with timestamp
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let timestamp = formatter.string(from: Date())
             let filename = "capture_\(timestamp)_\(reason).png"
-            let fileURL = folderURL.appendingPathComponent(filename)
             
             // Convert NSImage to PNG data
             guard let tiffData = image.tiffRepresentation,
@@ -454,12 +456,30 @@ final class AppCoordinator {
                 return
             }
             
-            // Write to file
+            // Save to desktop (backward compatibility)
+            let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+            let desktopFolderURL = desktopURL.appendingPathComponent("neb-screen-captures")
+            try? FileManager.default.createDirectory(at: desktopFolderURL, withIntermediateDirectories: true)
+            let desktopFileURL = desktopFolderURL.appendingPathComponent(filename)
+            
             do {
-                try pngData.write(to: fileURL)
-                Logger.shared.log(.capture, "💾 Screenshot saved: \(fileURL.path)")
+                try pngData.write(to: desktopFileURL)
+                Logger.shared.log(.capture, "💾 Screenshot saved to desktop: \(desktopFileURL.path)")
             } catch {
-                Logger.shared.log(.capture, "❌ Failed to save screenshot: \(error.localizedDescription)")
+                Logger.shared.log(.capture, "❌ Failed to save screenshot to desktop: \(error.localizedDescription)")
+            }
+            
+            // Save to assets folder (project root)
+            let projectRoot = "/Users/vagminviswanathan/Desktop/happyNebula/friday"
+            let assetsURL = URL(fileURLWithPath: projectRoot).appendingPathComponent("assets")
+            try? FileManager.default.createDirectory(at: assetsURL, withIntermediateDirectories: true)
+            let assetsFileURL = assetsURL.appendingPathComponent(filename)
+            
+            do {
+                try pngData.write(to: assetsFileURL)
+                Logger.shared.log(.capture, "💾 Screenshot saved to assets: \(assetsFileURL.path)")
+            } catch {
+                Logger.shared.log(.capture, "❌ Failed to save screenshot to assets: \(error.localizedDescription)")
             }
         }
     }

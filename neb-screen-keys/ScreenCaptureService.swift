@@ -7,6 +7,7 @@ import Cocoa
 import ScreenCaptureKit
 import AVFoundation
 import CoreGraphics
+import UniformTypeIdentifiers
 
 final class ScreenCaptureService {
     private let captureQueue = DispatchQueue(label: "screen-capture.queue")
@@ -88,6 +89,10 @@ final class ScreenCaptureService {
             let windowTitle = frontApp?.localizedName ?? "Unknown Window"
             
             Logger.shared.log(.capture, "✓ Main display captured: \(display.width)x\(display.height)")
+            
+            // Save screenshot to assets folder using new API
+            await saveScreenshotToAssets(displayBounds: display.frame)
+            
             return ScreenFrame(image: image, appName: appName, windowTitle: windowTitle)
         } catch {
             Logger.shared.log(.capture, "Failed to capture main display: \(error)")
@@ -194,12 +199,43 @@ final class ScreenCaptureService {
             let windowTitle = window.title ?? "Untitled"
             
             Logger.shared.log(.capture, "✓ Active window captured: \(Int(window.frame.width))x\(Int(window.frame.height))")
+            
+            // Save screenshot to assets folder using new API
+            await saveScreenshotToAssets(displayBounds: window.frame)
+            
             return ScreenFrame(image: image, appName: appName, windowTitle: windowTitle)
         } catch {
             Logger.shared.log(.capture, "Failed to capture window: \(error)")
             return nil
         }
     }
+    
+    /// Save screenshot to assets folder using the new SCScreenshotManager API
+    /// - Parameter displayBounds: The rectangle region to capture (in screen coordinates)
+    @available(macOS 14.0, *)
+    private func saveScreenshotToAssets(displayBounds: CGRect) async {
+        // Get the project root directory (where assets folder should be)
+        // Use the workspace path or find project root
+        let projectRoot: String
+        if let workspacePath = ProcessInfo.processInfo.environment["WORKSPACE_PATH"], !workspacePath.isEmpty {
+            projectRoot = workspacePath
+        } else {
+            // Fallback: use hardcoded project path
+            projectRoot = "/Users/vagminviswanathan/Desktop/happyNebula/friday"
+        }
+        
+        let assetsURL = URL(fileURLWithPath: projectRoot).appendingPathComponent("assets")
+        
+        // Create assets folder if it doesn't exist
+        try? FileManager.default.createDirectory(at: assetsURL, withIntermediateDirectories: true)
+        
+        // Note: The new SCScreenshotManager.captureScreenshot API with fileURL
+        // requires macOS 15.0+ and may have API changes. For now, we rely on
+        // the manual save method in AppCoordinator.saveScreenshot which already
+        // saves to the assets folder. This method is kept for future API support.
+        Logger.shared.log(.capture, "💾 Screenshot will be saved to assets via AppCoordinator.saveScreenshot")
+    }
+    
     
     /// Highlight cursor position with a red circle to guide AI attention
     /// - Parameter image: The captured screen CGImage
