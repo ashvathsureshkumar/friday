@@ -31,17 +31,18 @@ final class AppCoordinator {
     private var executionConsumerTask: Task<Void, Never>?
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "cd8e4a41-de13-46ac-8229-81c84b96dab3") {
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=") {
 
         // Log environment variable status for debugging
         Logger.shared.log(.system, "AppCoordinator initialization:")
         Logger.shared.log(.system, "  GROK_API_KEY: \(grokApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(grokApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_API_KEY: \(nebulaApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(nebulaApiKey.prefix(10))...)")")
-        Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: \(nebulaCollection.isEmpty ? "❌ MISSING" : "✓ Present")")
+        Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: Will be generated dynamically on first use")
 
         let grokClient = GrokClient(apiKey: grokApiKey)
-        let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
+        // Initialize with a temporary ID - will be replaced when collection is created
+        let tempCollectionId = UUID().uuidString
+        let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: tempCollectionId)
         self.grok = grokClient
         self.nebula = nebulaClient
         self.annotator = AnnotatorService(grok: grokClient, capture: captureService)
@@ -87,15 +88,25 @@ final class AppCoordinator {
             }
             self.keystrokeMonitor.start()
 
-            // self.maybeAnnotate(reason: "launch")  // Disabled for testing
-            // CONSUMER FLOW: Start the periodic AI processing loop
-            self.startAnnotatorLoop()
-            
-            // CONSUMER A: Start Nebula consumer (stores all annotations)
-            self.startNebulaConsumer()
-            
-            // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
-            self.startExecutionAgentConsumer()
+            // Clear Nebula memories on launch FIRST (for demo purposes)
+            // This must complete before starting consumers to ensure collection exists
+            self.clearNebulaMemories { [weak self] success in
+                guard let self = self else { return }
+                if success {
+                    Logger.shared.log(.nebula, "✅ Collection ready, starting consumers...")
+                } else {
+                    Logger.shared.log(.nebula, "⚠️ Collection setup had issues, but continuing...")
+                }
+                
+                // CONSUMER FLOW: Start the periodic AI processing loop
+                self.startAnnotatorLoop()
+                
+                // CONSUMER A: Start Nebula consumer (stores all annotations)
+                self.startNebulaConsumer()
+                
+                // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
+                self.startExecutionAgentConsumer()
+            }
 
             // Initial screen capture on launch (with delay to ensure permissions are processed)
             Logger.shared.log(.capture, "Scheduling initial capture on launch...")
@@ -155,6 +166,9 @@ final class AppCoordinator {
                 Logger.shared.log(.capture, "✅ Screen capture succeeded, storing in buffer...")
                 await self.contextBuffer.updateLatestScreen(frame)
                 Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
+                
+                // Save screenshot for debugging
+                self.saveScreenshot(frame.image, reason: reason)
                 
                 // Debug: Check buffer state after storing
                 let stats = await self.contextBuffer.getStats()
@@ -412,6 +426,116 @@ final class AppCoordinator {
         }
 
         return nil
+    }
+    
+    // MARK: - Debug Helpers
+    
+    /// Save screenshot to desktop folder for debugging
+    private func saveScreenshot(_ image: NSImage, reason: String) {
+        Task {
+            let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
+            let folderURL = desktopURL.appendingPathComponent("neb-screen-captures")
+            
+            // Create folder if it doesn't exist
+            try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            
+            // Generate filename with timestamp
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            let timestamp = formatter.string(from: Date())
+            let filename = "capture_\(timestamp)_\(reason).png"
+            let fileURL = folderURL.appendingPathComponent(filename)
+            
+            // Convert NSImage to PNG data
+            guard let tiffData = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiffData),
+                  let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                Logger.shared.log(.capture, "❌ Failed to convert image to PNG for saving")
+                return
+            }
+            
+            // Write to file
+            do {
+                try pngData.write(to: fileURL)
+                Logger.shared.log(.capture, "💾 Screenshot saved: \(fileURL.path)")
+            } catch {
+                Logger.shared.log(.capture, "❌ Failed to save screenshot: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    /// Clear all Nebula memories on app launch by deleting and recreating the collection
+    /// Creates a new collection with a dynamically generated UUID
+    /// Calls completion when done (true = success, false = had errors but continuing)
+    private func clearNebulaMemories(completion: @escaping (Bool) -> Void) {
+        Logger.shared.log(.nebula, "🧹 Clearing all Nebula memories for demo (deleting and recreating collection)...")
+        
+        // Helper function to create a new collection with retry logic
+        func createNewCollection(retryCount: Int = 0) {
+            // Generate a unique name with timestamp to avoid conflicts
+            let uniqueName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970))"
+            
+            nebula.createCollection(name: uniqueName) { [weak self] createResult in
+                guard let self = self else {
+                    completion(false)
+                    return
+                }
+                
+                switch createResult {
+                case .success(let newCollectionId):
+                    Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
+                    self.nebula.setCollectionId(newCollectionId)
+                    Logger.shared.log(.nebula, "✅ Collection ready for use")
+                    completion(true)
+                    
+                case .failure(let error):
+                    let errorString = error.localizedDescription
+                    Logger.shared.log(.nebula, "❌ Failed to create new collection: \(errorString)")
+                    
+                    // If 409 (already exists) and we haven't retried, try again with different name
+                    if errorString.contains("409") || errorString.contains("already exists") {
+                        if retryCount < 3 {
+                            Logger.shared.log(.nebula, "🔄 Retrying collection creation (attempt \(retryCount + 1))...")
+                            createNewCollection(retryCount: retryCount + 1)
+                        } else {
+                            Logger.shared.log(.nebula, "⚠️ Max retries reached, continuing with existing collection ID")
+                            completion(false)
+                        }
+                    } else {
+                        Logger.shared.log(.nebula, "⚠️ Collection creation failed, but continuing anyway")
+                        completion(false)
+                    }
+                }
+            }
+        }
+        
+        // Try to delete existing collection first
+        nebula.deleteCollection { [weak self] deleteResult in
+            guard let self = self else {
+                completion(false)
+                return
+            }
+            
+            switch deleteResult {
+            case .success:
+                Logger.shared.log(.nebula, "✅ Collection deleted successfully")
+                // Wait a bit before creating new one to ensure deletion is processed
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    createNewCollection()
+                }
+                
+            case .failure(let error):
+                // If deletion failed (404 = doesn't exist, or other error), create a new one anyway
+                let errorString = error.localizedDescription
+                if errorString.contains("404") || errorString.contains("Not Found") {
+                    Logger.shared.log(.nebula, "ℹ️ Collection doesn't exist (expected on first run)")
+                } else {
+                    Logger.shared.log(.nebula, "⚠️ Collection deletion result: \(errorString)")
+                }
+                Logger.shared.log(.nebula, "Creating new collection...")
+                createNewCollection()
+            }
+        }
     }
 }
 

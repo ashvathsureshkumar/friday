@@ -9,6 +9,7 @@
 # Derived data
 DerivedData/
 build/
+assets/*
 
 # Local env files
 .env

@@ -26,8 +26,9 @@ final class EventMonitor {
 
     private func handle(event: NSEvent) {
         if event.type == .keyDown {
-            // Cmd+Shift+K (keyCode 40 = 'k')
-            if event.modifierFlags.contains([.command, .shift]) && event.keyCode == 40 {
+            // Squiggly line ~ (keyCode 50 = grave/tilde key, no modifiers needed)
+            if event.keyCode == 50 && !event.modifierFlags.contains(.command) && !event.modifierFlags.contains(.shift) {
+                Logger.shared.log(.event, "Chat toggle detected: ~ key")
                 onChatToggle?()
             } else if event.modifierFlags.contains(.command) && event.keyCode == 48 {
                 onShortcut?("cmd-tab")

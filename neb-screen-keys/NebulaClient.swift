@@ -71,7 +71,7 @@ struct NebulaSearchResponse: Codable {
 
 final class NebulaClient {
     private let apiKey: String
-    private let collectionId: String
+    private var collectionId: String
     private let baseURL = URL(string: "https://api.nebulacloud.app")!
     private let session: URLSession
 
@@ -88,6 +88,16 @@ final class NebulaClient {
         Logger.shared.log(.nebula, "  Base URL: \(baseURL.absoluteString)")
         Logger.shared.log(.nebula, "  API Key format: \(cleanKey.hasPrefix("neb_") ? "✓ Valid (neb_...)" : "⚠️ Unexpected format")")
         Logger.shared.log(.nebula, "  Collection ID: \(collectionId)")
+    }
+    
+    /// Get the current collection ID
+    func getCollectionId() -> String {
+        return collectionId
+    }
+    
+    /// Set a new collection ID (after recreating collection)
+    func setCollectionId(_ newId: String) {
+        self.collectionId = newId
     }
 
     func addMemory(content: String, metadata: [String: Any], completion: @escaping (Result<Void, Error>) -> Void) {
@@ -321,6 +331,143 @@ final class NebulaClient {
             }
             
             completion(.success(data ?? Data()))
+        }.resume()
+    }
+    
+    // MARK: - Collection Management
+    
+    /// Delete a collection (and all its memories)
+    func deleteCollection(completion: @escaping (Result<Void, Error>) -> Void) {
+        Logger.shared.log(.nebula, "Deleting collection: \(collectionId)")
+        
+        let deleteURL = baseURL.appendingPathComponent("v1/collections/\(collectionId)")
+        var urlRequest = URLRequest(url: deleteURL)
+        urlRequest.httpMethod = "DELETE"
+        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        Logger.shared.log(.nebula, "DELETE \(deleteURL.absoluteString)")
+        
+        session.dataTask(with: urlRequest) { data, response, error in
+            if let error = error {
+                Logger.shared.log(.nebula, "Delete collection failed: \(error.localizedDescription)")
+                completion(.failure(error))
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
+                
+                // Accept 200-299 and 404 (already deleted) as success
+                if (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 404 {
+                    Logger.shared.log(.nebula, "✅ Collection deleted successfully")
+                    completion(.success(()))
+                } else {
+                    if let data = data, let errorBody = String(data: data, encoding: .utf8) {
+                        Logger.shared.log(.nebula, "Delete collection error (\(httpResponse.statusCode)): \(errorBody)")
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: errorBody])
+                        completion(.failure(error))
+                    } else {
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: "Delete collection failed with status \(httpResponse.statusCode)"])
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }.resume()
+    }
+    
+    /// Create a new collection - let the API generate the ID dynamically
+    func createCollection(name: String = "neb-screen-keys", completion: @escaping (Result<String, Error>) -> Void) {
+        Logger.shared.log(.nebula, "Creating new collection: \(name) (API will generate ID)")
+        
+        let createURL = baseURL.appendingPathComponent("v1/collections")
+        var urlRequest = URLRequest(url: createURL)
+        urlRequest.httpMethod = "POST"
+        urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        // Create request body - don't include ID, let API generate it
+        let requestBody: [String: Any] = ["name": name]
+        do {
+            urlRequest.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+        } catch {
+            Logger.shared.log(.nebula, "Failed to encode collection creation request: \(error.localizedDescription)")
+            completion(.failure(error))
+            return
+        }
+        
+        Logger.shared.log(.nebula, "POST \(createURL.absoluteString)")
+        
+        session.dataTask(with: urlRequest) { data, response, error in
+            if let error = error {
+                Logger.shared.log(.nebula, "Create collection failed: \(error.localizedDescription)")
+                completion(.failure(error))
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
+                
+                if (200...299).contains(httpResponse.statusCode) {
+                    // Parse the response to get the collection ID from the API
+                    if let data = data {
+                        do {
+                            if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                                // The API returns the collection ID nested in "results" object
+                                // Try: results.id, id, collection_id, data.id
+                                let collectionId = (json["results"] as? [String: Any])?["id"] as? String
+                                    ?? json["id"] as? String 
+                                    ?? json["collection_id"] as? String
+                                    ?? json["collectionId"] as? String
+                                    ?? (json["data"] as? [String: Any])?["id"] as? String
+                                
+                                if let id = collectionId {
+                                    Logger.shared.log(.nebula, "✅ Collection created successfully with ID: \(id)")
+                                    completion(.success(id))
+                                } else {
+                                    // Log the full response for debugging
+                                    if let responseString = String(data: data, encoding: .utf8) {
+                                        Logger.shared.log(.nebula, "Response: \(responseString)")
+                                    }
+                                    Logger.shared.log(.nebula, "⚠️ Could not find collection ID in response")
+                                    let error = NSError(domain: "nebula", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not parse collection ID from response"])
+                                    completion(.failure(error))
+                                }
+                            } else {
+                                Logger.shared.log(.nebula, "⚠️ Response is not valid JSON")
+                                let error = NSError(domain: "nebula", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid JSON response"])
+                                completion(.failure(error))
+                            }
+                        } catch {
+                            Logger.shared.log(.nebula, "Failed to parse collection creation response: \(error.localizedDescription)")
+                            if let responseString = String(data: data, encoding: .utf8) {
+                                Logger.shared.log(.nebula, "Response body: \(responseString)")
+                            }
+                            completion(.failure(error))
+                        }
+                    } else {
+                        Logger.shared.log(.nebula, "⚠️ No data in response")
+                        let error = NSError(domain: "nebula", code: -1, userInfo: [NSLocalizedDescriptionKey: "No data in response"])
+                        completion(.failure(error))
+                    }
+                } else {
+                    if let data = data, let errorBody = String(data: data, encoding: .utf8) {
+                        Logger.shared.log(.nebula, "Create collection error (\(httpResponse.statusCode)): \(errorBody)")
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: errorBody])
+                        completion(.failure(error))
+                    } else {
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: "Create collection failed with status \(httpResponse.statusCode)"])
+                        completion(.failure(error))
+                    }
+                }
+            }
         }.resume()
     }
 }
