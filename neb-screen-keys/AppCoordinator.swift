@@ -206,7 +206,17 @@ final class AppCoordinator {
                 
                 Logger.shared.log(.flow, "✅ Buffer has data! Proceeding to consume...")
 
-                // Consume buffer
+                // Capture a fresh screenshot before processing (ensures we always have latest screen state)
+                Logger.shared.log(.flow, "📸 Capturing fresh screenshot for annotation...")
+                let freshFrame = await self.captureService.captureActiveScreen()
+                if let frame = freshFrame {
+                    await self.contextBuffer.updateLatestScreen(frame)
+                    Logger.shared.log(.flow, "✅ Fresh screenshot captured and buffered")
+                } else {
+                    Logger.shared.log(.flow, "⚠️ Fresh capture failed, using buffered frame")
+                }
+
+                // Consume buffer (now with fresh screenshot)
                 guard let batch = await self.contextBuffer.consumeAndClear() else {
                     Logger.shared.log(.flow, "Buffer had data but consumeAndClear returned nil")
                     continue
