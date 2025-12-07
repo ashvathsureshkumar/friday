@@ -19,6 +19,8 @@ final class AppCoordinator {
     private let nebula: NebulaClient
     private let grok: GrokClient
     private let executionAgent: ExecutionAgent
+    private static let nebulaCollectionDefaultsKey = "NebulaCollectionID"
+    private let providedNebulaCollectionId: String?
     private var chatHistory: [GrokMessage] = []
 
     // MARK: - State
@@ -27,16 +29,26 @@ final class AppCoordinator {
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=") {
 
+        let trimmedCollectionId = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let providedCollectionId = (trimmedCollectionId?.isEmpty == false) ? trimmedCollectionId : nil
+        let persistedCollectionId = UserDefaults.standard.string(forKey: AppCoordinator.nebulaCollectionDefaultsKey)
+        let initialCollectionId = providedCollectionId ?? persistedCollectionId ?? UUID().uuidString
+
         // Log environment variable status for debugging
         Logger.shared.log(.system, "AppCoordinator initialization:")
         Logger.shared.log(.system, "  GROK_API_KEY: \(grokApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(grokApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_API_KEY: \(nebulaApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(nebulaApiKey.prefix(10))...)")")
-        Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: Will be generated dynamically on first use")
+        if let providedCollectionId {
+            Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: ✓ Provided (\(providedCollectionId.prefix(10))...)")
+        } else if let persistedCollectionId {
+            Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: ✓ Persisted (\(persistedCollectionId.prefix(10))...)")
+        } else {
+            Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: ⚠️ Not provided; will create and persist")
+        }
 
         let grokClient = GrokClient(apiKey: grokApiKey)
-        // Initialize with a temporary ID - will be replaced when collection is created
-        let tempCollectionId = UUID().uuidString
-        let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: tempCollectionId)
+        self.providedNebulaCollectionId = providedCollectionId
+        let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: initialCollectionId)
         self.grok = grokClient
         self.nebula = nebulaClient
         self.annotator = AnnotatorService(grok: grokClient, capture: captureService)
@@ -52,6 +64,18 @@ final class AppCoordinator {
 
         chatOverlay.onSendMessage = { [weak self] message in
             self?.handleChatMessage(message)
+        }
+
+        chatOverlay.onExecuteScript = { [weak self] in
+            self?.executePendingScript()
+        }
+
+        chatOverlay.onCancelScript = { [weak self] in
+            self?.cancelPendingScript()
+        }
+
+        chatOverlay.onChatOpened = { [weak self] in
+            self?.sendProactiveGreeting()
         }
     }
 
@@ -271,33 +295,487 @@ final class AppCoordinator {
         }
     }
 
+    private func debugLog(_ text: String) {
+        let logFile = "/tmp/neb-chat-debug.log"
+        let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(timestamp)] \(text)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile) {
+                if let handle = FileHandle(forWritingAtPath: logFile) {
+                    handle.seekToEndOfFile()
+                    handle.write(data)
+                    handle.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: logFile, contents: data, attributes: nil)
+            }
+        }
+    }
+
+    private func sendProactiveGreeting() {
+        debugLog("sendProactiveGreeting called")
+
+        // Reset chat history for fresh conversation
+        chatHistory.removeAll()
+
+        // Use detached task to avoid MainActor deadlock with screen capture
+        Task.detached { [weak self] in
+            guard let self = self else { return }
+
+            // Capture full screen in background
+            await MainActor.run { self.debugLog("Capturing full screen for greeting...") }
+            let frame = await self.captureService.captureFullScreen()
+            await MainActor.run { self.debugLog("Full screen capture done: \(frame != nil ? "success" : "nil")") }
+
+            // Build proactive message with screen context
+            var userContent: [GrokMessagePart] = [
+                GrokMessagePart(type: "text", text: "The user just opened the chat. Look at their screen and give a brief, helpful greeting that acknowledges what they're working on. Offer to help with something relevant to what you see. Keep it concise (1-2 sentences).")
+            ]
+
+            // Add screen image if available
+            if let frame = frame,
+               let tiffData = frame.image.tiffRepresentation,
+               let bitmap = NSBitmapImageRep(data: tiffData),
+               let pngData = bitmap.representation(using: .png, properties: [:]) {
+                let base64 = pngData.base64EncodedString()
+                let imageUrl = ImageUrl(url: "data:image/png;base64,\(base64)")
+                userContent.append(GrokMessagePart(type: "image_url", text: nil, imageUrl: imageUrl))
+                await MainActor.run { self.debugLog("Added screen capture to greeting request") }
+            }
+
+            await MainActor.run {
+                self.debugLog("Sending proactive greeting request to Grok...")
+
+                let systemPrompt = """
+                You are a helpful AI desktop assistant. You can see the user's screen.
+                Be concise and helpful. Acknowledge what the user is currently working on based on what you see.
+                Offer relevant assistance based on their current context.
+
+                AUTOMATION CAPABILITY:
+                If the user asks you to DO something (run a command, type text, click something, automate a task),
+                you can generate AppleScript to perform the action. When generating automation:
+                1. First explain briefly what the script will do
+                2. Include the AppleScript in a ```applescript code block
+                3. Tell the user to press Cmd+Y to execute or Cmd+N to cancel
+
+                Only generate AppleScript when the user explicitly asks you to DO something.
+                For questions or explanations, just respond normally without scripts.
+                """
+
+                var messages = [GrokMessage(role: "system", content: [GrokMessagePart(type: "text", text: systemPrompt)])]
+                messages.append(GrokMessage(role: "user", content: userContent))
+
+                // Use grok-4-1-fast-non-reasoning for fast multimodal responses
+                let request = GrokRequest(model: "grok-4-1-fast-non-reasoning", messages: messages, attachments: nil, stream: false)
+
+                self.grok.createResponse(request) { [weak self] result in
+                    DispatchQueue.main.async {
+                        switch result {
+                        case .failure(let error):
+                            self?.debugLog("Greeting API error: \(error.localizedDescription)")
+                            self?.chatOverlay.addMessage(role: "assistant", content: "Hi! How can I help you?")
+                            self?.chatOverlay.enableInput()  // Show input after greeting
+                        case .success(let data):
+                            self?.debugLog("Greeting response received: \(data.count) bytes")
+                            if let response = self?.parseGrokResponse(data) {
+                                self?.debugLog("Greeting parsed: \(response.prefix(100))")
+                                self?.chatHistory.append(GrokMessage(role: "assistant", content: [GrokMessagePart(type: "text", text: response)]))
+                                self?.chatOverlay.addMessage(role: "assistant", content: response)
+                            } else {
+                                self?.debugLog("Greeting parse failed")
+                                self?.chatOverlay.addMessage(role: "assistant", content: "Hi! How can I help you?")
+                            }
+                            self?.chatOverlay.enableInput()  // Show input after greeting
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func handleChatMessage(_ message: String) {
-        chatHistory.append(GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: message)]))
+        debugLog("handleChatMessage called with: \(message)")
 
-        let systemPrompt = """
-        You are a helpful AI assistant. Be concise and helpful in your responses.
-        """
+        // Show "Thinking..." and pause inactivity timer
+        chatOverlay.setWaitingForResponse(true)
 
-        var messages = [GrokMessage(role: "system", content: [GrokMessagePart(type: "text", text: systemPrompt)])]
-        messages.append(contentsOf: chatHistory)
+        // Use detached task to avoid MainActor deadlock with screen capture
+        Task.detached { [weak self] in
+            guard let self = self else { return }
 
-        let request = GrokRequest(model: "grok-2-latest", messages: messages, attachments: nil, stream: false)
+            // Run screen capture and Nebula search in parallel
+            await MainActor.run { self.debugLog("Starting parallel: screen capture + Nebula search...") }
 
+            // Start both operations concurrently
+            async let screenCaptureTask = self.captureService.captureFullScreen()
+            async let nebulaSearchTask = self.searchNebulaAsync(query: message)
+
+            // Wait for both to complete
+            let frame = await screenCaptureTask
+            let memoryContext = await nebulaSearchTask
+
+            await MainActor.run {
+                self.debugLog("Parallel ops done: screen=\(frame != nil ? "success" : "nil"), memories=\(memoryContext.count) chars")
+            }
+
+            // Build user message with optional image
+            var userContent: [GrokMessagePart] = [GrokMessagePart(type: "text", text: message)]
+
+            // Add screen image if available
+            if let frame = frame,
+               let tiffData = frame.image.tiffRepresentation,
+               let bitmap = NSBitmapImageRep(data: tiffData),
+               let pngData = bitmap.representation(using: .png, properties: [:]) {
+                let base64 = pngData.base64EncodedString()
+                let imageUrl = ImageUrl(url: "data:image/png;base64,\(base64)")
+                userContent.append(GrokMessagePart(type: "image_url", text: nil, imageUrl: imageUrl))
+                await MainActor.run { self.debugLog("Added screen capture to message") }
+            }
+
+            await MainActor.run { self.debugLog("About to run on MainActor...") }
+            await MainActor.run {
+                self.debugLog("Inside MainActor.run")
+                self.chatHistory.append(GrokMessage(role: "user", content: userContent))
+
+                // Build memory context section for system prompt
+                let memorySection = memoryContext.isEmpty ? "" : """
+
+                RETRIEVED MEMORIES (context from past interactions):
+                \(memoryContext)
+
+                Use this context to personalize your responses and remember past interactions with the user.
+                """
+
+                let systemPrompt = """
+                You are a helpful AI desktop assistant. You can see the user's screen.
+                Be concise and helpful. If the user asks about what's on screen, describe what you see.
+                Help them with tasks related to what they're working on.
+                \(memorySection)
+                MEMORY TOOL:
+                You have access to a memory search tool called "search_memories". Use it when you need
+                to search for MORE SPECIFIC information beyond what's already provided in RETRIEVED MEMORIES above.
+
+                AUTOMATION CAPABILITY:
+                If the user asks you to DO something (run a command, type text, click something, automate a task),
+                you can generate AppleScript to perform the action. When generating automation:
+                1. First explain briefly what the script will do
+                2. Include the AppleScript in a ```applescript code block
+                3. Tell the user to press Cmd+Y to execute or Cmd+N to cancel
+
+                Example automation response:
+                "I'll type that command in Terminal for you.
+
+                ```applescript
+                tell application "Terminal"
+                    activate
+                end tell
+                delay 0.3
+                tell application "System Events"
+                    keystroke "ls -la"
+                    keystroke return
+                end tell
+                ```
+
+                Press Cmd+Y to execute or Cmd+N to cancel."
+
+                Only generate AppleScript when the user explicitly asks you to DO something.
+                For questions or explanations, just respond normally without scripts.
+                """
+
+                var messages = [GrokMessage(role: "system", content: [GrokMessagePart(type: "text", text: systemPrompt)])]
+                messages.append(contentsOf: self.chatHistory)
+
+                // Define the search_memories tool
+                let searchMemoriesTool = GrokTool(
+                    type: "function",
+                    function: GrokFunction(
+                        name: "search_memories",
+                        description: "Search past memories and context for relevant information. Use this when the user asks about past events, previous discussions, or needs historical context.",
+                        parameters: GrokFunctionParameters(
+                            type: "object",
+                            properties: [
+                                "query": GrokPropertyDefinition(
+                                    type: "string",
+                                    description: "The search query to find relevant memories"
+                                )
+                            ],
+                            required: ["query"]
+                        )
+                    )
+                )
+
+                // Use grok-4-1-fast-non-reasoning for fast multimodal responses with tools
+                let request = GrokRequest(
+                    model: "grok-4-1-fast-non-reasoning",
+                    messages: messages,
+                    attachments: nil,
+                    stream: false,
+                    tools: [searchMemoriesTool],
+                    toolChoice: "auto"
+                )
+
+                self.debugLog("Sending to Grok API with screen context and tools...")
+                self.sendChatRequest(request: request, messages: messages)
+            }
+        }
+    }
+
+    /// Send chat request and handle tool calls recursively
+    private func sendChatRequest(request: GrokRequest, messages: [GrokMessage]) {
         grok.createResponse(request) { [weak self] result in
             DispatchQueue.main.async {
                 switch result {
                 case .failure(let error):
+                    self?.debugLog("API error: \(error.localizedDescription)")
                     self?.chatOverlay.addMessage(role: "assistant", content: "Error: \(error.localizedDescription)")
                 case .success(let data):
-                    if let response = self?.parseGrokResponse(data) {
+                    self?.debugLog("Response received: \(data.count) bytes")
+                    if let rawResponse = String(data: data, encoding: .utf8) {
+                        self?.debugLog("Raw response: \(rawResponse.prefix(500))")
+                    }
+
+                    // Try to parse as tool call response first
+                    if let toolCallResponse = self?.parseToolCallResponse(data) {
+                        self?.debugLog("Detected tool call: \(toolCallResponse.name)")
+                        self?.handleToolCall(toolCallResponse, originalMessages: messages, request: request)
+                    } else if let response = self?.parseGrokResponse(data) {
+                        // Normal text response
+                        self?.debugLog("Parsed OK: \(response.prefix(100))")
                         self?.chatHistory.append(GrokMessage(role: "assistant", content: [GrokMessagePart(type: "text", text: response)]))
+
+                        // Check for AppleScript and store it for execution
+                        if let script = self?.extractAppleScript(from: response) {
+                            self?.pendingAppleScript = script
+                            self?.debugLog("Detected AppleScript, stored for execution")
+                            self?.chatOverlay.showScriptPending(true)
+                        } else {
+                            self?.pendingAppleScript = nil
+                            self?.chatOverlay.showScriptPending(false)
+                        }
+
                         self?.chatOverlay.addMessage(role: "assistant", content: response)
                     } else {
+                        self?.debugLog("Parse FAILED - calling addMessage with error")
                         self?.chatOverlay.addMessage(role: "assistant", content: "Failed to parse response")
                     }
                 }
             }
         }
+    }
+
+    /// Parse tool call from Grok response
+    private func parseToolCallResponse(_ data: Data) -> (id: String, name: String, arguments: [String: Any])? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let first = choices.first,
+              let message = first["message"] as? [String: Any],
+              let toolCalls = message["tool_calls"] as? [[String: Any]],
+              let toolCall = toolCalls.first,
+              let id = toolCall["id"] as? String,
+              let function = toolCall["function"] as? [String: Any],
+              let name = function["name"] as? String,
+              let argumentsString = function["arguments"] as? String,
+              let argumentsData = argumentsString.data(using: .utf8),
+              let arguments = try? JSONSerialization.jsonObject(with: argumentsData) as? [String: Any] else {
+            return nil
+        }
+        return (id: id, name: name, arguments: arguments)
+    }
+
+    /// Handle tool call by executing the tool and sending results back
+    private func handleToolCall(_ toolCall: (id: String, name: String, arguments: [String: Any]), originalMessages: [GrokMessage], request: GrokRequest) {
+        debugLog("Handling tool call: \(toolCall.name) with args: \(toolCall.arguments)")
+
+        switch toolCall.name {
+        case "search_memories":
+            guard let query = toolCall.arguments["query"] as? String else {
+                debugLog("Missing query argument for search_memories")
+                chatOverlay.addMessage(role: "assistant", content: "Error: Could not parse memory search query")
+                return
+            }
+
+            debugLog("Searching Nebula for: \(query)")
+            nebula.searchMemories(query: query, limit: 5) { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+
+                    var toolResultContent: String
+                    switch result {
+                    case .failure(let error):
+                        self.debugLog("Nebula search failed: \(error.localizedDescription)")
+                        toolResultContent = "Memory search failed: \(error.localizedDescription)"
+                    case .success(let data):
+                        // Parse Nebula search results
+                        if let results = self.parseNebulaSearchResults(data) {
+                            if results.isEmpty {
+                                toolResultContent = "No relevant memories found."
+                            } else {
+                                toolResultContent = "Found \(results.count) relevant memories:\n\n" + results.joined(separator: "\n\n---\n\n")
+                            }
+                            self.debugLog("Nebula returned \(results.count) results")
+                        } else {
+                            toolResultContent = "No relevant memories found."
+                            self.debugLog("Could not parse Nebula response")
+                        }
+                    }
+
+                    // Build follow-up request with tool result
+                    // Need to include the assistant's tool call message and our tool response
+                    var newMessages = originalMessages
+
+                    // Add the assistant message that made the tool call
+                    // Must include the tool_calls array for the API to understand context
+                    let assistantToolCallMsg = GrokMessage(
+                        role: "assistant",
+                        content: nil,  // Content is null when making tool calls
+                        toolCalls: [
+                            GrokToolCall(
+                                id: toolCall.id,
+                                type: "function",
+                                function: GrokToolCallFunction(
+                                    name: toolCall.name,
+                                    arguments: String(data: try! JSONSerialization.data(withJSONObject: toolCall.arguments), encoding: .utf8) ?? "{}"
+                                )
+                            )
+                        ]
+                    )
+                    newMessages.append(assistantToolCallMsg)
+
+                    // Add the tool result message with the tool_call_id
+                    let toolResultMsg = GrokMessage(
+                        role: "tool",
+                        content: [GrokMessagePart(type: "text", text: toolResultContent)],
+                        toolCallId: toolCall.id
+                    )
+                    newMessages.append(toolResultMsg)
+
+                    // Send follow-up request without tools to get final response
+                    let followUpRequest = GrokRequest(
+                        model: request.model,
+                        messages: newMessages,
+                        attachments: nil,
+                        stream: false,
+                        tools: nil,  // No tools for follow-up
+                        toolChoice: nil
+                    )
+
+                    self.debugLog("Sending follow-up request with tool results...")
+                    self.sendChatRequest(request: followUpRequest, messages: newMessages)
+                }
+            }
+
+        default:
+            debugLog("Unknown tool: \(toolCall.name)")
+            chatOverlay.addMessage(role: "assistant", content: "Error: Unknown tool '\(toolCall.name)'")
+        }
+    }
+
+    /// Parse Nebula search results into readable strings
+    private func parseNebulaSearchResults(_ data: Data) -> [String]? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        // Try different response formats
+        var results: [[String: Any]]?
+
+        if let r = json["results"] as? [[String: Any]] {
+            results = r
+        } else if let memories = json["memories"] as? [[String: Any]] {
+            results = memories
+        } else if let data = json["data"] as? [[String: Any]] {
+            results = data
+        }
+
+        guard let memories = results else {
+            return []
+        }
+
+        return memories.compactMap { memory -> String? in
+            let content = memory["content"] as? String ?? memory["raw_text"] as? String ?? ""
+            let metadata = memory["metadata"] as? [String: Any] ?? [:]
+            let taskLabel = metadata["task_label"] as? String ?? ""
+            let app = metadata["app"] as? String ?? ""
+
+            if content.isEmpty { return nil }
+
+            var result = content
+            if !taskLabel.isEmpty || !app.isEmpty {
+                result = "[\(taskLabel) - \(app)]\n\(content)"
+            }
+            return result
+        }
+    }
+
+    /// Async wrapper for Nebula search - returns formatted memory context string
+    private func searchNebulaAsync(query: String) async -> String {
+        await withCheckedContinuation { continuation in
+            nebula.searchMemories(query: query, limit: 5) { [weak self] result in
+                switch result {
+                case .failure(let error):
+                    // 404 errors are expected when collection is new/empty - just return empty
+                    let errorStr = error.localizedDescription
+                    if errorStr.contains("Not Found") || errorStr.contains("404") {
+                        Logger.shared.log(.nebula, "Upfront search: collection empty or not ready")
+                    } else {
+                        Logger.shared.log(.nebula, "Upfront search failed: \(errorStr)")
+                    }
+                    continuation.resume(returning: "")
+                case .success(let data):
+                    if let results = self?.parseNebulaSearchResults(data), !results.isEmpty {
+                        let context = results.joined(separator: "\n\n---\n\n")
+                        Logger.shared.log(.nebula, "Upfront search: found \(results.count) memories")
+                        continuation.resume(returning: context)
+                    } else {
+                        Logger.shared.log(.nebula, "Upfront search: no results")
+                        continuation.resume(returning: "")
+                    }
+                }
+            }
+        }
+    }
+
+    private func extractAppleScript(from text: String) -> String? {
+        guard let startRange = text.range(of: "```applescript"),
+              let endRange = text.range(of: "```", range: startRange.upperBound..<text.endIndex) else {
+            return nil
+        }
+        let script = String(text[startRange.upperBound..<endRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return script.isEmpty ? nil : script
+    }
+
+    private func executePendingScript() {
+        guard let script = pendingAppleScript else {
+            debugLog("No pending script to execute")
+            return
+        }
+
+        debugLog("Executing pending AppleScript...")
+        let appleScript = NSAppleScript(source: script)
+        var errorDict: NSDictionary?
+        let result = appleScript?.executeAndReturnError(&errorDict)
+
+        if let errorDict = errorDict {
+            debugLog("AppleScript execution error: \(errorDict)")
+            chatOverlay.addMessage(role: "assistant", content: "Script execution failed: \(errorDict)")
+        } else if let result = result {
+            debugLog("AppleScript executed successfully: \(result.stringValue ?? "no return value")")
+            chatOverlay.addMessage(role: "assistant", content: "Done!")
+        } else {
+            debugLog("AppleScript executed (no return value)")
+            chatOverlay.addMessage(role: "assistant", content: "Done!")
+        }
+
+        pendingAppleScript = nil
+        chatOverlay.showScriptPending(false)
+    }
+
+    private func cancelPendingScript() {
+        debugLog("Cancelled pending script")
+        pendingAppleScript = nil
+        chatOverlay.showScriptPending(false)
+        chatOverlay.addMessage(role: "assistant", content: "Cancelled.")
     }
 
     private func parseGrokResponse(_ data: Data) -> String? {

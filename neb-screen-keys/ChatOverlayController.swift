@@ -63,6 +63,7 @@ final class ChatOverlayController: NSObject {
     private var inputField: NSTextField?
     private var inputContainer: NSView?
     private var messages: [ChatMessage] = []
+    private var responseLabel: NSTextField?  // Simple text label for latest response
 
     // State
     private var inactivityTimer: Timer?
@@ -92,6 +93,13 @@ final class ChatOverlayController: NSObject {
     private var currentInputHeight: CGFloat = 32  // Current dynamic input height
 
     var onSendMessage: ((String) -> Void)?
+    var onExecuteScript: (() -> Void)?
+    var onCancelScript: (() -> Void)?
+    var onChatOpened: (() -> Void)?  // Called when chat is shown
+
+    private var scriptPending = false
+    private var inputEnabled = false  // Input hidden until greeting shown
+    private var waitingForResponse = false  // Pause inactivity timer while waiting
 
     private var isVisible: Bool {
         panel?.isVisible ?? false
@@ -115,23 +123,41 @@ final class ChatOverlayController: NSObject {
         }
         // Reset to input-only state
         currentInputHeight = baseInputFieldHeight
-        updatePanelHeight(animated: false)
+        inputEnabled = false  // Hide input until greeting shown
+        inputBlurView?.isHidden = true
+        glowView?.isHidden = true
         messagesBlurView?.isHidden = true
+
+        // Show a "thinking" indicator initially
+        messagesBlurView?.isHidden = false
+        responseLabel?.stringValue = "Thinking..."
+
+        updatePanelHeight(animated: false)
 
         positionTopRight()
         panel?.alphaValue = 1.0
         panel?.orderFrontRegardless()
         panel?.makeKey()  // Make panel key to receive keyboard input
 
-        // Start capturing keyboard
-        startKeyboardCapture()
+        // Don't start keyboard capture until input is enabled
         inputText = ""
+
+        // Don't start inactivity timer until greeting is shown (in enableInput)
+
+        // Notify that chat was opened (for proactive greeting)
+        onChatOpened?()
+    }
+
+    /// Enable the input field after greeting is shown
+    func enableInput() {
+        inputEnabled = true
+        inputBlurView?.isHidden = false
+        glowView?.isHidden = false
+        startKeyboardCapture()
         updateInputDisplay()
-
-        // Start glow animation
         startGlowAnimation()
-
-        resetInactivityTimer()
+        updatePanelHeight(animated: true)
+        resetInactivityTimer()  // Start fade countdown now that greeting is shown
     }
 
     func hide() {
@@ -141,31 +167,66 @@ final class ChatOverlayController: NSObject {
         panel?.orderOut(nil)
         // Reset state
         messages.removeAll()
-        messagesContainer?.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        responseLabel?.stringValue = ""
         inputText = ""
         currentInputHeight = baseInputFieldHeight
+        inputEnabled = false
     }
 
     func addMessage(role: String, content: String) {
-        messages.append(ChatMessage(role: role, content: content))
+        // Only show assistant messages (latest response only)
+        guard role == "assistant" else { return }
 
-        // Show messages area if first message
-        if messages.count == 1 {
-            messagesBlurView?.isHidden = false
-        }
+        // Response arrived - no longer waiting
+        waitingForResponse = false
 
-        refreshMessages()
+        // Show messages area
+        messagesBlurView?.isHidden = false
+
+        // Update the response label directly (no bubbles, just text)
+        responseLabel?.stringValue = content
+
         updatePanelHeight(animated: true)
         resetInactivityTimer()
     }
 
-    private func calculateMessagesHeight() -> CGFloat {
-        guard let container = messagesContainer, !messages.isEmpty else { return 0 }
+    func showScriptPending(_ pending: Bool) {
+        scriptPending = pending
+        // Could add visual indicator here (e.g., highlight border)
+    }
 
-        // Force layout to get accurate size
-        container.layoutSubtreeIfNeeded()
-        let contentHeight = container.fittingSize.height + 16 // Add padding
-        return min(contentHeight, maxMessagesHeight)
+    /// Call when sending a message to pause inactivity timer
+    func setWaitingForResponse(_ waiting: Bool) {
+        waitingForResponse = waiting
+        if waiting {
+            // Stop the timer while waiting
+            stopAllTimers()
+            // Show "Thinking..." indicator
+            responseLabel?.stringValue = "Thinking..."
+            updatePanelHeight(animated: true)
+        }
+    }
+
+    private func calculateMessagesHeight() -> CGFloat {
+        guard let label = responseLabel, !label.stringValue.isEmpty else { return 0 }
+
+        // Calculate height needed for the text
+        let availableWidth = panelWidth - glowBorderWidth * 2 - 24  // Padding
+        let font = NSFont.systemFont(ofSize: 14)
+        let textStorage = NSTextStorage(string: label.stringValue)
+        textStorage.addAttribute(.font, value: font, range: NSRange(location: 0, length: textStorage.length))
+
+        let textContainer = NSTextContainer(size: NSSize(width: availableWidth, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.lineFragmentPadding = 0
+
+        let layoutManager = NSLayoutManager()
+        layoutManager.addTextContainer(textContainer)
+        textStorage.addLayoutManager(layoutManager)
+
+        layoutManager.ensureLayout(for: textContainer)
+        let textHeight = layoutManager.usedRect(for: textContainer).height
+
+        return min(textHeight + 24, maxMessagesHeight)  // Add padding
     }
 
     private func updatePanelHeight(animated: Bool) {
@@ -173,10 +234,10 @@ final class ChatOverlayController: NSObject {
 
         let messagesHeight = calculateMessagesHeight()
         let hasMessages = messagesHeight > 0
-        let inputAreaHeight = currentInputAreaHeight
+        let inputAreaHeight = inputEnabled ? currentInputAreaHeight : 0
         // Messages area includes the thin border gap (same as glowBorderWidth)
         let messagesAreaHeight = hasMessages ? messagesHeight + glowBorderWidth * 2 : 0
-        let totalHeight = inputAreaHeight + (hasMessages ? messagesAreaHeight + messageSpacing : 0)
+        let totalHeight = max(inputAreaHeight + (hasMessages ? messagesAreaHeight + messageSpacing : 0), messagesAreaHeight)
 
         var frame = panel.frame
         // Keep top fixed, expand downward
@@ -244,6 +305,10 @@ final class ChatOverlayController: NSObject {
                 width: panelWidth - glowBorderWidth * 2,
                 height: max(0, messagesHeight)
             )
+            // Update responseLabel frame to fill the blur view
+            if let label = responseLabel {
+                label.frame = messagesBlur.bounds.insetBy(dx: 12, dy: 12)
+            }
         }
     }
 
@@ -300,29 +365,20 @@ final class ChatOverlayController: NSObject {
         messagesDarkOverlay.layer?.backgroundColor = spaceBackground.cgColor
         messagesBlur.addSubview(messagesDarkOverlay)
 
-        let scrollView = NSScrollView(frame: messagesBlur.bounds.insetBy(dx: 12, dy: 8))
-        scrollView.autoresizingMask = [.width, .height]
-        scrollView.hasVerticalScroller = true
-        scrollView.scrollerStyle = .overlay
-        scrollView.borderType = .noBorder
-        scrollView.drawsBackground = false
-        scrollView.verticalScrollElasticity = .allowed
+        // Simple response label (no bubbles, just text filling the area)
+        let respLabel = NSTextField(wrappingLabelWithString: "")
+        respLabel.frame = messagesBlur.bounds.insetBy(dx: 12, dy: 12)
+        respLabel.autoresizingMask = [.width, .height]
+        respLabel.isEditable = false
+        respLabel.isSelectable = true
+        respLabel.drawsBackground = false
+        respLabel.textColor = .white.withAlphaComponent(0.95)
+        respLabel.font = NSFont.systemFont(ofSize: 14)
+        respLabel.lineBreakMode = .byWordWrapping
+        respLabel.maximumNumberOfLines = 0
+        messagesBlur.addSubview(respLabel)
+        self.responseLabel = respLabel
 
-        let messagesContainer = NSStackView()
-        messagesContainer.orientation = .vertical
-        messagesContainer.alignment = .leading
-        messagesContainer.spacing = 12
-        messagesContainer.translatesAutoresizingMaskIntoConstraints = false
-        messagesContainer.edgeInsets = NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
-
-        let clipView = NSClipView()
-        clipView.documentView = messagesContainer
-        clipView.drawsBackground = false
-        scrollView.contentView = clipView
-
-        messagesBlur.addSubview(scrollView)
-        self.scrollView = scrollView
-        self.messagesContainer = messagesContainer
         self.messagesBlurView = messagesBlur
         contentView.addSubview(messagesBlur)
 
@@ -524,6 +580,20 @@ final class ChatOverlayController: NSObject {
         // Command key shortcuts
         if modifiers.contains(.command) {
             switch keyCode {
+            case 16: // Cmd+Y - execute pending script
+                if scriptPending {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onExecuteScript?()
+                    }
+                }
+                return
+            case 45: // Cmd+N - cancel pending script
+                if scriptPending {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.onCancelScript?()
+                    }
+                }
+                return
             case 0: // Cmd+A - select all (clear and re-type would be the effect, but for now just keep text)
                 // In this simple input, select all doesn't make sense visually, but we acknowledge it
                 return

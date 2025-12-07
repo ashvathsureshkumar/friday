@@ -75,7 +75,7 @@ final class AnnotatorService {
 
         // Build OpenAI-compatible chat request with vision
         let request = GrokRequest(
-            model: "grok-4-fast",  // Fast Grok 4 model
+            model: "grok-4-1-fast-non-reasoning",  // Fast multimodal model
             messages: [
                 GrokMessage(role: "user", content: [
                     GrokMessagePart(type: "text", text: prompt),

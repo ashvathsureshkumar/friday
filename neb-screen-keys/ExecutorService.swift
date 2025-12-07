@@ -41,7 +41,7 @@ final class ExecutorService {
         """
         
         let request = GrokRequest(
-            model: "grok-4-fast",  // Using Grok 4 Fast for quick suggestions
+            model: "grok-4-1-fast-non-reasoning",  // Fast multimodal model
             messages: [GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: previewPrompt)])],
             attachments: nil,
             stream: false
@@ -120,7 +120,7 @@ final class ExecutorService {
             Logger.shared.log(.executor, "Sending execution request to Grok...")
             
             let request = GrokRequest(
-                model: "grok-4-fast",  // Using Grok 4 Fast for execution planning
+                model: "grok-4-1-fast-non-reasoning",  // Fast multimodal model
                 messages: [GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: planPrompt)])],
                 attachments: nil,
                 stream: false

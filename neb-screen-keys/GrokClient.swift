@@ -81,7 +81,105 @@ struct GrokMessagePart: Codable {
 
 struct GrokMessage: Codable {
     let role: String
-    let content: [GrokMessagePart]
+    let content: [GrokMessagePart]?
+    let toolCalls: [GrokToolCall]?
+    let toolCallId: String?
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+        case toolCallId = "tool_call_id"
+    }
+
+    init(role: String, content: [GrokMessagePart]?, toolCalls: [GrokToolCall]? = nil, toolCallId: String? = nil) {
+        self.role = role
+        self.content = content
+        self.toolCalls = toolCalls
+        self.toolCallId = toolCallId
+    }
+}
+
+// MARK: - Tool Definitions (OpenAI-compatible function calling)
+
+struct GrokTool: Codable {
+    let type: String
+    let function: GrokFunction
+}
+
+struct GrokFunction: Codable {
+    let name: String
+    let description: String
+    let parameters: GrokFunctionParameters
+}
+
+struct GrokFunctionParameters: Codable {
+    let type: String
+    let properties: [String: GrokPropertyDefinition]
+    let required: [String]
+}
+
+struct GrokPropertyDefinition: Codable {
+    let type: String
+    let description: String
+}
+
+// MARK: - Tool Call Response Structures
+
+struct GrokToolCall: Codable {
+    let id: String
+    let type: String
+    let function: GrokToolCallFunction
+}
+
+struct GrokToolCallFunction: Codable {
+    let name: String
+    let arguments: String  // JSON string of arguments
+}
+
+// MARK: - Chat Completion Response with Tool Calls
+
+struct GrokChatResponse: Codable {
+    let id: String?
+    let choices: [GrokChoice]
+}
+
+struct GrokChoice: Codable {
+    let index: Int
+    let message: GrokResponseMessage
+    let finishReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case index
+        case message
+        case finishReason = "finish_reason"
+    }
+}
+
+struct GrokResponseMessage: Codable {
+    let role: String
+    let content: String?
+    let toolCalls: [GrokToolCall]?
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case content
+        case toolCalls = "tool_calls"
+    }
+}
+
+// MARK: - Tool Result Message
+
+struct GrokToolResultMessage: Codable {
+    let role: String
+    let toolCallId: String
+    let content: String
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case toolCallId = "tool_call_id"
+        case content
+    }
 }
 
 // MARK: - Grok Request
@@ -91,6 +189,26 @@ struct GrokRequest: Codable {
     let messages: [GrokMessage]
     let attachments: [String]?
     let stream: Bool
+    let tools: [GrokTool]?
+    let toolChoice: String?
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case messages
+        case attachments
+        case stream
+        case tools
+        case toolChoice = "tool_choice"
+    }
+
+    init(model: String, messages: [GrokMessage], attachments: [String]? = nil, stream: Bool, tools: [GrokTool]? = nil, toolChoice: String? = nil) {
+        self.model = model
+        self.messages = messages
+        self.attachments = attachments
+        self.stream = stream
+        self.tools = tools
+        self.toolChoice = toolChoice
+    }
 }
 
 // MARK: - Grok Client
@@ -153,9 +271,9 @@ final class GrokClient {
 
             // Log summary without the massive base64 image
             let hasImage = payload.messages.contains { message in
-                message.content.contains { part in
+                message.content?.contains { part in
                     part.imageUrl != nil
-                }
+                } ?? false
             }
             Logger.shared.log(.annotator, "Sending Grok request: model=\(payload.model), messages=\(payload.messages.count), hasImage=\(hasImage), size=\(jsonData.count / 1024)KB")
         } catch {
