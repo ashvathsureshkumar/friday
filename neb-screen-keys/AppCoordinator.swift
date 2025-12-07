@@ -74,9 +74,9 @@ final class AppCoordinator {
             }
             self.eventMonitor.start()
 
-            // Clear Nebula memories on launch FIRST (for demo purposes)
+            // Create a new Nebula collection on launch
             // This must complete before starting consumers to ensure collection exists
-            self.clearNebulaMemories { [weak self] success in
+            self.setupNebulaCollection { [weak self] success in
                 guard let self = self else { return }
                 if success {
                     Logger.shared.log(.nebula, "✅ Collection ready, starting polling loop...")
@@ -125,6 +125,7 @@ final class AppCoordinator {
                 let batch = BufferBatch(
                     keystrokes: "",
                     screenFrame: frame,
+                    ocrText: nil,  // OCR will be extracted in AnnotatorService
                     timestamp: Date()
                 )
                 
@@ -326,76 +327,57 @@ final class AppCoordinator {
         return nil
     }
     
-    /// Clear all Nebula memories on app launch by deleting and recreating the collection
-    /// Creates a new collection with a dynamically generated UUID
+    /// Create a new Nebula collection on app launch
+    /// Creates a new collection with a dynamically generated UUID (doesn't delete old collections)
     /// Calls completion when done (true = success, false = had errors but continuing)
-    private func clearNebulaMemories(completion: @escaping (Bool) -> Void) {
-        Logger.shared.log(.nebula, "🧹 Clearing all Nebula memories for demo (deleting and recreating collection)...")
+    private func setupNebulaCollection(completion: @escaping (Bool) -> Void) {
+        Logger.shared.log(.nebula, "Creating new Nebula collection...")
         
-        // Helper function to create a new collection with retry logic
-        func createNewCollection(retryCount: Int = 0) {
-            // Generate a unique name with timestamp to avoid conflicts
-            let uniqueName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970))"
-            
-            nebula.createCollection(name: uniqueName) { [weak self] createResult in
-                guard let self = self else {
-                    completion(false)
-                    return
-                }
-                
-                switch createResult {
-                case .success(let newCollectionId):
-                    Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
-                    self.nebula.setCollectionId(newCollectionId)
-                    Logger.shared.log(.nebula, "✅ Collection ready for use")
-                    completion(true)
-                    
-                case .failure(let error):
-                    let errorString = error.localizedDescription
-                    Logger.shared.log(.nebula, "❌ Failed to create new collection: \(errorString)")
-                    
-                    // If 409 (already exists) and we haven't retried, try again with different name
-                    if errorString.contains("409") || errorString.contains("already exists") {
-                        if retryCount < 3 {
-                            Logger.shared.log(.nebula, "🔄 Retrying collection creation (attempt \(retryCount + 1))...")
-                            createNewCollection(retryCount: retryCount + 1)
-                        } else {
-                            Logger.shared.log(.nebula, "⚠️ Max retries reached, continuing with existing collection ID")
-                            completion(false)
-                        }
-                    } else {
-                        Logger.shared.log(.nebula, "⚠️ Collection creation failed, but continuing anyway")
-                        completion(false)
-                    }
-                }
-            }
-        }
+        // Generate a unique name with timestamp to avoid conflicts
+        let uniqueName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970))"
         
-        // Try to delete existing collection first
-        nebula.deleteCollection { [weak self] deleteResult in
+        nebula.createCollection(name: uniqueName) { [weak self] createResult in
             guard let self = self else {
                 completion(false)
                 return
             }
             
-            switch deleteResult {
-            case .success:
-                Logger.shared.log(.nebula, "✅ Collection deleted successfully")
-                // Wait a bit before creating new one to ensure deletion is processed
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    createNewCollection()
-                }
+            switch createResult {
+            case .success(let newCollectionId):
+                Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
+                self.nebula.setCollectionId(newCollectionId)
+                Logger.shared.log(.nebula, "✅ Collection ready for use")
+                completion(true)
                 
             case .failure(let error):
-                // If deletion failed (404 = doesn't exist, or other error), create a new one anyway
                 let errorString = error.localizedDescription
-                if errorString.contains("404") || errorString.contains("Not Found") {
-                    Logger.shared.log(.nebula, "ℹ️ Collection doesn't exist (expected on first run)")
+                Logger.shared.log(.nebula, "❌ Failed to create new collection: \(errorString)")
+                
+                // If 409 (already exists), try again with different name
+                if errorString.contains("409") || errorString.contains("already exists") {
+                    Logger.shared.log(.nebula, "🔄 Collection name conflict, retrying with new timestamp...")
+                    // Retry once with a slightly different timestamp
+                    let retryName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970) + 1)"
+                    self.nebula.createCollection(name: retryName) { [weak self] retryResult in
+                        guard let self = self else {
+                            completion(false)
+                            return
+                        }
+                        switch retryResult {
+                        case .success(let newCollectionId):
+                            Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
+                            self.nebula.setCollectionId(newCollectionId)
+                            Logger.shared.log(.nebula, "✅ Collection ready for use")
+                            completion(true)
+                        case .failure:
+                            Logger.shared.log(.nebula, "⚠️ Collection creation failed after retry, but continuing anyway")
+                            completion(false)
+                        }
+                    }
                 } else {
-                    Logger.shared.log(.nebula, "⚠️ Collection deletion result: \(errorString)")
+                    Logger.shared.log(.nebula, "⚠️ Collection creation failed, but continuing anyway")
+                    completion(false)
                 }
-                Logger.shared.log(.nebula, "Creating new collection...")
-                createNewCollection()
             }
         }
     }

@@ -9,6 +9,7 @@ import Foundation
 struct BufferBatch {
     let keystrokes: String
     let screenFrame: ScreenFrame?
+    let ocrText: String?  // OCR-extracted text from screenshot
     let timestamp: Date
 }
 
@@ -31,7 +32,10 @@ actor ContextBufferService {
     /// - Parameter keystrokes: String representing recent keystroke activity
     func append(keystrokes: String) {
         keystrokeBuffer += keystrokes
-        Logger.shared.log(.buffer, "Appended '\(keystrokes)'. Buffer size: \(keystrokeBuffer.count) chars")
+        let bufferSize = keystrokeBuffer.count
+        Task { @MainActor in
+            Logger.shared.log(.buffer, "Appended '\(keystrokes)'. Buffer size: \(bufferSize) chars")
+        }
     }
 
     /// Update the latest screen frame
@@ -39,7 +43,9 @@ actor ContextBufferService {
     func updateLatestScreen(_ frame: ScreenFrame) {
         latestScreenFrame = frame
         lastScreenUpdate = Date()
-        Logger.shared.log(.buffer, "Screen frame updated. App: \(frame.appName), Window: \(frame.windowTitle)")
+        Task { @MainActor in
+            Logger.shared.log(.buffer, "Screen frame updated. App: \(frame.appName), Window: \(frame.windowTitle)")
+        }
     }
 
     /// Consume and clear the buffer, returning accumulated data
@@ -47,7 +53,9 @@ actor ContextBufferService {
     func consumeAndClear() -> BufferBatch? {
         // Only return a batch if we have either keystrokes or a screen frame
         guard !keystrokeBuffer.isEmpty || latestScreenFrame != nil else {
-            Logger.shared.log(.buffer, "Consume requested but buffer is empty")
+            Task { @MainActor in
+                Logger.shared.log(.buffer, "Consume requested but buffer is empty")
+            }
             return nil
         }
 
@@ -57,13 +65,16 @@ actor ContextBufferService {
         let batch = BufferBatch(
             keystrokes: keystrokeBuffer,
             screenFrame: latestScreenFrame,
+            ocrText: nil,  // OCR will be extracted in AnnotatorService if needed
             timestamp: Date()
         )
 
         // Clear keystroke buffer but keep screen frame as baseline
         keystrokeBuffer = ""
 
-        Logger.shared.log(.buffer, "Batch consumed: \(keystrokeCount) chars + \(hasScreen ? "ScreenFrame" : "No screen"). Buffer cleared.")
+        Task { @MainActor in
+            Logger.shared.log(.buffer, "Batch consumed: \(keystrokeCount) chars + \(hasScreen ? "ScreenFrame" : "No screen"). Buffer cleared.")
+        }
 
         return batch
     }

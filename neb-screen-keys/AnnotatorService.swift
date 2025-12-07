@@ -25,13 +25,15 @@ struct ChatCompletionResponse: Codable {
 final class AnnotatorService {
     private let grok: GrokClient
     private let capture: ScreenCaptureService
+    private let ocrClient: DeepSeekOCRClient
 
-    init(grok: GrokClient, capture: ScreenCaptureService) {
+    init(grok: GrokClient, capture: ScreenCaptureService, ocrClient: DeepSeekOCRClient? = nil) {
         self.grok = grok
         self.capture = capture
+        self.ocrClient = ocrClient ?? DeepSeekOCRClient()
     }
 
-    /// Annotate using a BufferBatch (keystrokes + screen frame)
+    /// Annotate using a BufferBatch (keystrokes + screen frame + OCR text)
     func annotate(batch: BufferBatch) async -> Result<AnnotatedContext, Error> {
         Logger.shared.log(.annotator, "Annotation request started (keystrokes: \(batch.keystrokes.count) chars)")
 
@@ -49,13 +51,27 @@ final class AnnotatorService {
             return .failure(err)
         }
 
+        // Extract OCR text if not already provided
+        var ocrText = batch.ocrText
+        if ocrText == nil {
+            Logger.shared.log(.annotator, "Extracting text via OCR...")
+            switch await ocrClient.extractText(from: pngData) {
+            case .success(let text):
+                ocrText = text
+                Logger.shared.log(.annotator, "✓ OCR extracted \(text.count) characters")
+            case .failure(let error):
+                Logger.shared.log(.annotator, "⚠️ OCR failed: \(error.localizedDescription), continuing without OCR text")
+                ocrText = nil
+            }
+        }
+
         Logger.shared.log(.annotator, "Sending request to Grok (image: \(pngData.count / 1024)KB)...")
 
         let b64 = pngData.base64EncodedString()
         let imageDataUrl = "data:image/png;base64,\(b64)"
 
-        // Build prompt with keystroke context
-        let prompt = buildPromptWithKeystrokes(frame: frame, keystrokes: batch.keystrokes)
+        // Build prompt with keystroke context and OCR text
+        let prompt = buildPromptWithOCR(frame: frame, keystrokes: batch.keystrokes, ocrText: ocrText)
 
         // Build OpenAI-compatible chat request with vision
         let request = GrokRequest(
@@ -130,11 +146,208 @@ final class AnnotatorService {
         }
 
         // Use the new method with empty keystrokes
-        let batch = BufferBatch(keystrokes: "", screenFrame: frame, timestamp: Date())
+        let batch = BufferBatch(keystrokes: "", screenFrame: frame, ocrText: nil, timestamp: Date())
         return await annotate(batch: batch)
     }
 
-    /// Build the Grok prompt with keystroke context included
+    /// Build the Grok prompt with OCR text and keystroke context
+    private func buildPromptWithOCR(frame: ScreenFrame, keystrokes: String, ocrText: String?) -> String {
+        // Build OCR text section with heavy emphasis
+        let ocrSection: String
+        if let ocrText = ocrText, !ocrText.isEmpty {
+            ocrSection = """
+            
+            4. **OCR Text Transcript (PRIMARY SOURCE):** The following is a LITERAL, COMPLETE transcript of ALL visible text extracted from the screenshot. This is the GROUND TRUTH - use it as your primary source for ALL details:
+            ```
+            \(ocrText)
+            ```
+            
+            **CRITICAL OCR USAGE RULES:**
+            - The OCR transcript contains EXACT text visible on screen - treat it as the authoritative source
+            - Extract and quote EXACT strings from OCR: error messages, function names, file paths, URLs, commands
+            - Include specific line numbers, error codes, port numbers, IP addresses, email addresses from OCR
+            - Extract button labels, menu items, UI element text exactly as shown in OCR
+            - For code editors: extract function signatures, variable names, imports, file paths exactly
+            - For terminals: extract commands, output, error messages, file paths exactly
+            - For browsers: extract URLs, page titles, form field labels, button text exactly
+            - For emails: extract recipient addresses, subject lines, body text snippets exactly
+            - DO NOT paraphrase or summarize OCR text - quote it verbatim when providing details
+            - The executor needs EXACT strings to perform actions (click buttons, type commands, navigate to URLs)
+            """
+        } else {
+            ocrSection = """
+            
+            4. **OCR Text Transcript:** Not available for this screenshot. Analyze the image directly.
+            """
+        }
+        
+        let keystrokeSection = keystrokes.isEmpty ? "" : """
+        
+        3. **Recent Keystrokes:** \(keystrokes.count) characters of activity detected. This represents user interaction intensity.
+        """
+        
+        return """
+        You are the **Cortex** of an intelligent OS agent. Your capability is **Visual Intent Understanding with Rich Context Extraction**.
+
+        **YOUR INPUTS:**
+        1. **Active Window Screenshot:** I am sending you a screenshot of ONLY the user's active window (the application they are currently using). No dock, menu bar, or other windows are visible.
+        2. **Clean Context:** You are seeing exactly what the user is focused on - the window content without distractions.
+        3. **Metadata:** Active App Name (\(frame.appName)), Window Title (\(frame.windowTitle)).\(keystrokeSection)\(ocrSection)
+
+        **YOUR OBJECTIVE:**
+        Analyze the screenshot AND the OCR text transcript to produce a structured "AnnotatedContext" JSON object with RICH, DETAILED, VERBOSE information. This annotation will be used by an executor agent that needs EXACT details to perform UI automation. The more specific and detailed your annotation, the better the executor can complete tasks.
+
+        **CRITICAL ANALYSIS RULES - BE EXTREMELY DETAILED:**
+        1. **OCR Text is PRIMARY SOURCE:** When OCR transcript is available, it is the GROUND TRUTH. Extract ALL actionable details from it:
+           - Quote EXACT error messages verbatim (e.g., "ConnectionRefusedError: [Errno 61] Connection refused on port 5432")
+           - Extract EXACT function names, class names, variable names (e.g., "def processBatch(self, batch: BufferBatch)")
+           - Extract EXACT file paths (e.g., "/Users/vagminviswanathan/Desktop/happyNebula/friday/neb-screen-keys/AppCoordinator.swift")
+           - Extract EXACT URLs (e.g., "https://api.nebulacloud.app/v1/collections")
+           - Extract EXACT terminal commands (e.g., "docker-compose up -d postgres")
+           - Extract EXACT button labels, menu items (e.g., "File > Save", "Run > Build")
+           - Extract EXACT email addresses, subject lines
+           - Extract line numbers, error codes, status codes, port numbers
+        2. **Provide Rich Context for Executor:** The executor needs raw material to automate tasks. Include:
+           - Exact strings to type, click, or navigate to
+           - Specific UI elements (button names, menu paths, field labels)
+           - File paths and locations
+           - Commands to execute
+           - Error messages to search for or fix
+           - Code snippets visible on screen
+        3. **Be Verbose in Summary:** The summary field should be DETAILED and include:
+           - Exact quotes from OCR when relevant
+           - Specific file names, function names, error messages
+           - Current state of the application (what's open, what's selected, what's visible)
+           - What the user is trying to accomplish based on visible context
+           - Any blockers or friction points with exact details
+        4. **Extract Actionable Details:** Think about what an automation agent would need:
+           - What button should be clicked? (exact label from OCR)
+           - What command should be typed? (exact command from OCR)
+           - What file should be opened? (exact path from OCR)
+           - What error should be fixed? (exact error message from OCR)
+           - What URL should be navigated to? (exact URL from OCR)
+        5. **Window Content Analysis by Type:**
+           - **Code Editor:** Extract file path, function names, imports, error messages, line numbers, code snippets
+           - **Terminal:** Extract current directory, commands run, command output, error messages, file paths
+           - **Browser:** Extract URL, page title, form field labels, button text, search queries
+           - **Email:** Extract recipient addresses, subject line, body text snippets, attachment names
+           - **IDE/Editor:** Extract open files, active tab, visible code, error messages, build status
+        6. **Detect Friction with Specifics:** When user is blocked, include:
+           - Exact error message from OCR
+           - What command or action caused the error
+           - What the user was trying to accomplish
+           - What needs to be fixed (specific file, line, configuration)
+        7. **Strict Output:** Return ONLY raw JSON. Do not use Markdown blocks (```json). Do not add conversational text.
+
+        **OUTPUT SCHEMA:**
+        You must respond with ONLY a valid JSON object matching this structure:
+        {
+        "task_label": "String. Short, specific intent (e.g., 'Fixing ConnectionRefusedError on Port 5432', 'Composing Email to john@vc.com about Pitch Deck', 'Debugging TypeError in AppCoordinator.swift line 45'). Use OCR text to make this PRECISE with specific details.",
+        "confidence": 0.0 to 1.0 (Float). 1.0 = window content is perfectly clear. 0.5 = ambiguous or loading screen.",
+        "summary": "String. A VERY DETAILED, VERBOSE description (2-4 sentences) describing what the user is doing. MUST include:
+        - Exact quotes from OCR text (error messages, function names, file paths, URLs, commands)
+        - Specific details: file names, line numbers, error codes, port numbers, email addresses
+        - Current state: what's open, what's selected, what's visible
+        - User intent: what they're trying to accomplish
+        - Blockers: specific errors or issues preventing progress
+        Example: 'User is debugging a ConnectionRefusedError in their terminal. OCR shows exact error: \"ConnectionRefusedError: [Errno 61] Connection refused on port 5432\" from running \"docker-compose up\". The terminal is in directory /Users/vagminviswanathan/Desktop/happyNebula/friday and shows PostgreSQL connection failure. User needs to start the database service or fix the connection configuration.'",
+        "activity_type": "String. One of: 'blocked', 'help_seeking', 'tedious', 'passive', 'meeting', 'productive'. You MUST pick one - see definitions below.",
+        "popup_style": "String. One of: 'cursor', 'notification'. See definitions below.",
+        "app": "String. The confirmed application name.",
+        "window_title": "String. The confirmed window title."
+        }
+
+        **ACTIVITY TYPE DEFINITIONS (you MUST choose exactly one - no "ambiguous" or "unknown"):**
+        - **blocked**: User is STUCK. Errors visible in OCR (red error text, "Connection Refused", compile failures, exceptions, crash logs). Include exact error message from OCR.
+        - **help_seeking**: User is SEARCHING for solutions. Stack Overflow visible in OCR, googling error messages, reading GitHub issues, "how to fix" searches. Include exact search query or error being researched.
+        - **tedious**: User doing REPETITIVE work that automation could speed up. Formatting code, copy-pasting between apps, running same commands (visible in OCR). Include specific repetitive actions.
+        - **passive**: User is READING or CONSUMING content. Documentation, articles, watching videos, casual browsing, social media. Also use for loading screens or unclear contexts.
+        - **meeting**: User is in a VIDEO CALL or screen sharing. Zoom, Teams, Meet, FaceTime visible in OCR or screenshot.
+        - **productive**: User is IN FLOW. Actively typing code, writing content, making progress. Do NOT interrupt. Include what they're working on specifically.
+
+        **POPUP STYLE DEFINITIONS:**
+        - **cursor**: Use when the action is CONTEXTUAL to cursor position. Examples: type a command in terminal at cursor, click a specific button, paste text at insertion point, edit code at current line.
+        - **notification**: Use when the action is APP-WIDE or GENERAL. Examples: format entire file, run build command, open new tab/window, switch applications, search Stack Overflow.
+
+        ---
+
+        ### FEW-SHOT EXAMPLES WITH RICH DETAILS
+
+        #### EXAMPLE 1: The "Blocked Engineer" (VERBOSE)
+        **Input Context:**
+        - App: iTerm2
+        - Window: "server_logs — zsh"
+        - OCR Text: "vagmin@MacBook-Pro friday % docker-compose up\nStarting postgres...\nERROR: ConnectionRefusedError: [Errno 61] Connection refused on port 5432\nPostgreSQL connection failed\nTraceback (most recent call last):\n  File \"/app/main.py\", line 45, in connect_db\n    conn = psycopg2.connect(host='localhost', port=5432)\npsycopg2.OperationalError: connection refused"
+        - Image: Terminal window showing error in red text.
+
+        **GOOD RESPONSE (RICH DETAILS):**
+        {
+        "task_label": "Fixing PostgreSQL ConnectionRefusedError on Port 5432",
+        "confidence": 0.95,
+        "summary": "User is debugging a PostgreSQL connection error. OCR shows exact error: 'ConnectionRefusedError: [Errno 61] Connection refused on port 5432' occurring when running 'docker-compose up'. The error originates from '/app/main.py' line 45 in function 'connect_db()' where psycopg2 is attempting to connect to localhost:5432. The PostgreSQL service appears to not be running or not accessible. User needs to either start the PostgreSQL service via 'docker-compose up postgres' or fix the connection configuration in the application.",
+        "activity_type": "blocked",
+        "popup_style": "cursor",
+        "app": "iTerm2",
+        "window_title": "server_logs — zsh"
+        }
+
+        #### EXAMPLE 2: The "Email Drafter" (VERBOSE)
+        **Input Context:**
+        - App: Google Chrome
+        - Window: "Compose: Pitch Deck - Gmail"
+        - OCR Text: "To: john@vc.com\nSubject: Pitch Deck\n\nHi John,\n\nAttached are the financials we discussed in our last meeting on December 5th. The Q4 projections show 40% growth...\n\nBest regards,\nVagmin"
+        - Image: Gmail compose window.
+
+        **GOOD RESPONSE (RICH DETAILS):**
+        {
+        "task_label": "Composing Email to john@vc.com about Pitch Deck with Q4 Financials",
+        "confidence": 0.95,
+        "summary": "User is composing an email in Gmail to investor john@vc.com. OCR shows exact recipient 'john@vc.com', subject line 'Pitch Deck', and body text referencing a previous meeting on December 5th. The email mentions Q4 financial projections showing 40% growth and includes an attachment. The email is signed 'Vagmin'. User is in the middle of drafting the email body.",
+        "activity_type": "productive",
+        "popup_style": "cursor",
+        "app": "Google Chrome",
+        "window_title": "Compose: Pitch Deck - Gmail"
+        }
+
+        #### EXAMPLE 3: The "Code Editor" (VERBOSE)
+        **Input Context:**
+        - App: Cursor
+        - Window: "AppCoordinator.swift:45"
+        - OCR Text: "import Cocoa\nimport CryptoKit\n\nfinal class AppCoordinator {\n    private let grok: GrokClient\n    \n    init(grokApiKey: String = ProcessInfo.processInfo.environment[\"GROK_API_KEY\"] ?? \"\") {\n        let grokClient = GrokClient(apiKey: grokApiKey)\n        self.grok = grokClient\n    }\n    \n    func startPollingLoop() {\n        // Polling loop implementation\n    }\n}"
+        - Image: Code editor showing Swift file with cursor on line 45.
+
+        **GOOD RESPONSE (RICH DETAILS):**
+        {
+        "task_label": "Implementing GrokClient Initialization in AppCoordinator.swift",
+        "confidence": 0.9,
+        "summary": "User is working on AppCoordinator.swift, specifically around line 45. OCR shows the file imports Cocoa and CryptoKit, defines a final class AppCoordinator with a private GrokClient property. The init method takes a grokApiKey parameter with default value from environment variable 'GROK_API_KEY', creates a GrokClient instance, and assigns it to self.grok. There's also a startPollingLoop() function visible. User appears to be implementing or modifying the initialization logic for the Grok API client integration.",
+        "activity_type": "productive",
+        "popup_style": "cursor",
+        "app": "Cursor",
+        "window_title": "AppCoordinator.swift:45"
+        }
+
+        #### EXAMPLE 4: The "Help Seeker" (VERBOSE)
+        **Input Context:**
+        - App: Arc Browser
+        - Window: "python ConnectionRefusedError port 5432 - Stack Overflow"
+        - OCR Text: "Stack Overflow\nSearch: python ConnectionRefusedError port 5432\n\nQuestion: How to fix 'ConnectionRefusedError: [Errno 61] Connection refused' on port 5432?\n\nAnswer 1: Make sure PostgreSQL is running: 'sudo service postgresql start'\nAnswer 2: Check if port is in use: 'lsof -i :5432'\nAnswer 3: Verify connection string uses correct host and port..."
+        - Image: Browser showing Stack Overflow search results.
+
+        **GOOD RESPONSE (RICH DETAILS):**
+        {
+        "task_label": "Researching ConnectionRefusedError on Port 5432 on Stack Overflow",
+        "confidence": 0.9,
+        "summary": "User is searching Stack Overflow for help with a Python ConnectionRefusedError on port 5432. OCR shows exact search query 'python ConnectionRefusedError port 5432' and the question title 'How to fix ConnectionRefusedError: [Errno 61] Connection refused on port 5432?'. Visible answers suggest checking if PostgreSQL is running with 'sudo service postgresql start', checking port usage with 'lsof -i :5432', and verifying connection string. User is actively researching solutions to a database connection issue.",
+        "activity_type": "help_seeking",
+        "popup_style": "notification",
+        "app": "Arc Browser",
+        "window_title": "python ConnectionRefusedError port 5432 - Stack Overflow"
+        }
+        """
+    }
+    
+    /// Build the Grok prompt with keystroke context included (legacy method)
     private func buildPromptWithKeystrokes(frame: ScreenFrame, keystrokes: String) -> String {
         let keystrokeSection = keystrokes.isEmpty ? "" : """
 
