@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Xcode user data
+**/*.xcuserstate
+**/*.xcuserdata/
+**/*.xcworkspace/xcuserdata/
+
+# Derived data
+DerivedData/
+
+# Local env files
+.env
+.config/neb-screen-keys/.env
+
