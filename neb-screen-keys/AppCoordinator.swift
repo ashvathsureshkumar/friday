@@ -27,6 +27,7 @@ final class AppCoordinator {
          nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
         let grokClient = GrokClient(apiKey: grokApiKey)
     private let executionAgent: ExecutionAgent
+    private var chatHistory: [GrokMessage] = []
 
     // MARK: - Producer Flow State
     private var lastScreenCaptureTime: Date?
@@ -37,15 +38,15 @@ final class AppCoordinator {
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "aec926de-022c-47ac-8ae3-ddcd7febf68c"){
-        
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "cd8e4a41-de13-46ac-8229-81c84b96dab3") {
+
         // Log environment variable status for debugging
         Logger.shared.log(.system, "AppCoordinator initialization:")
         Logger.shared.log(.system, "  GROK_API_KEY: \(grokApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(grokApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_API_KEY: \(nebulaApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(nebulaApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: \(nebulaCollection.isEmpty ? "❌ MISSING" : "✓ Present")")
-        
-        let grok = GrokClient(apiKey: grokApiKey)
+
+        let grokClient = GrokClient(apiKey: grokApiKey)
         let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
         self.grok = grokClient
         self.nebula = nebulaClient
@@ -145,11 +146,17 @@ final class AppCoordinator {
 
         Task { [weak self] in
             guard let self = self else { return }
+            Logger.shared.log(.capture, "Starting async capture task...")
             if let frame = await self.captureService.captureActiveScreen() {
+                Logger.shared.log(.capture, "✅ Screen capture succeeded, storing in buffer...")
                 await self.contextBuffer.updateLatestScreen(frame)
-                Logger.shared.log(.capture, "Screen captured and buffered (\(reason))")
+                Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
+                
+                // Debug: Check buffer state after storing
+                let stats = await self.contextBuffer.getStats()
+                Logger.shared.log(.capture, "📊 Buffer stats: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen)")
             } else {
-                Logger.shared.log(.capture, "Screen capture failed (\(reason))")
+                Logger.shared.log(.capture, "❌ Screen capture failed (\(reason))")
             }
         }
     }
@@ -170,11 +177,16 @@ final class AppCoordinator {
                 Logger.shared.log(.flow, "Loop tick. Checking buffer...")
 
                 // Check if buffer has data
+                let stats = await self.contextBuffer.getStats()
+                Logger.shared.log(.flow, "📊 Buffer state: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen), lastUpdate=\(stats.lastUpdate?.timeIntervalSinceNow ?? -999)")
+                
                 let hasData = await self.contextBuffer.hasData()
                 guard hasData else {
-                    Logger.shared.log(.flow, "Buffer empty, skipping annotation")
+                    Logger.shared.log(.flow, "❌ Buffer empty, skipping annotation")
                     continue
                 }
+                
+                Logger.shared.log(.flow, "✅ Buffer has data! Proceeding to consume...")
 
                 // Consume buffer
                 guard let batch = await self.contextBuffer.consumeAndClear() else {

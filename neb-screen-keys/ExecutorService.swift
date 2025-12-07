@@ -40,11 +40,11 @@ final class ExecutorService {
         Your actionable suggestion:
         """
         
-        let request = ChatRequest(
-            messages: [ChatMessage(role: "user", content: [.text(previewPrompt)])],
+        let request = GrokRequest(
             model: "grok-4-fast",  // Using Grok 4 Fast for quick suggestions
-            stream: false,
-            temperature: 0.7
+            messages: [GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: previewPrompt)])],
+            attachments: nil,
+            stream: false
         )
         
         Logger.shared.log(.executor, "Generating suggestion preview...")
@@ -119,11 +119,11 @@ final class ExecutorService {
             
             Logger.shared.log(.executor, "Sending execution request to Grok...")
             
-            let request = ChatRequest(
-                messages: [ChatMessage(role: "user", content: [.text(planPrompt)])],
+            let request = GrokRequest(
                 model: "grok-4-fast",  // Using Grok 4 Fast for execution planning
-                stream: false,
-                temperature: 0.7
+                messages: [GrokMessage(role: "user", content: [GrokMessagePart(type: "text", text: planPrompt)])],
+                attachments: nil,
+                stream: false
             )
 
             self.grok.createResponse(request) { result in
