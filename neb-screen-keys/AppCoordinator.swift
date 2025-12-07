@@ -36,22 +36,32 @@ final class AppCoordinator {
 
     func start() {
         Logger.shared.log("Coordinator start")
-        eventMonitor.onShortcut = { [weak self] _ in
-            self?.maybeAnnotate(reason: "shortcut")
-        }
-        eventMonitor.start()
-        keystrokeMonitor.onKeyEvent = { [weak self] in
-            self?.maybeAnnotate(reason: "keystroke")
-        }
-        keystrokeMonitor.start()
+        Permissions.ensure { [weak self] screen, ax in
+            guard let self = self else { return }
+            if screen == .denied {
+                Logger.shared.log("Screen Recording permission not granted; capture will fail.")
+            }
+            if ax == .denied {
+                Logger.shared.log("Accessibility permission not granted; keystroke monitoring and automation will fail.")
+            }
 
-        maybeAnnotate(reason: "launch")
+            self.eventMonitor.onShortcut = { [weak self] _ in
+                self?.maybeAnnotate(reason: "shortcut")
+            }
+            self.eventMonitor.start()
+            self.keystrokeMonitor.onKeyEvent = { [weak self] in
+                self?.maybeAnnotate(reason: "keystroke")
+            }
+            self.keystrokeMonitor.start()
+
+            self.maybeAnnotate(reason: "launch")
+        }
     }
 
     private func maybeAnnotate(reason: String) {
-        Task {
-            let result = await annotator.annotate()
+        Task { [weak self] in
             guard let self = self else { return }
+            let result = await self.annotator.annotate()
             switch result {
             case .failure(let error):
                 Logger.shared.log("Annotate failed (\(reason)): \(error)")
@@ -72,9 +82,9 @@ final class AppCoordinator {
     private func executeCurrentTask() {
         guard let taskId = stateStore.currentTaskId else { return }
         Logger.shared.log("Execute requested for task \(taskId)")
-        Task {
-            let result = await annotator.annotate()
+        Task { [weak self] in
             guard let self = self else { return }
+            let result = await self.annotator.annotate()
             switch result {
             case .failure(let error):
                 Logger.shared.log("Annotate before execute failed: \(error)")
