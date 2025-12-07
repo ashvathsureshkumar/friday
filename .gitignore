@@ -8,8 +8,8 @@
 
 # Derived data
 DerivedData/
+build/
 
 # Local env files
 .env
 .config/neb-screen-keys/.env
-

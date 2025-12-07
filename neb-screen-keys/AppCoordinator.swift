@@ -97,16 +97,20 @@ final class AppCoordinator {
         if let lastCapture = lastScreenCaptureTime,
            now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
             // Skip this capture, too soon
+            Logger.shared.log(.capture, "⏭️ Capture skipped (throttled). Reason: \(reason)")
             return
         }
 
         lastScreenCaptureTime = now
+        Logger.shared.log(.capture, "🎬 Initiating screen capture. Reason: \(reason)")
 
         Task { [weak self] in
             guard let self = self else { return }
             if let frame = await self.captureService.captureActiveScreen() {
                 await self.contextBuffer.updateLatestScreen(frame)
-                Logger.shared.log("Screen captured and buffered (\(reason))")
+                Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
+            } else {
+                Logger.shared.log(.capture, "❌ Screen capture failed (\(reason))")
             }
         }
     }
@@ -115,6 +119,8 @@ final class AppCoordinator {
 
     /// Start the periodic annotation loop that consumes buffered data
     private func startAnnotatorLoop() {
+        Logger.shared.log(.flow, "🔄 Consumer loop starting (3s interval)...")
+
         consumerTask = Task { [weak self] in
             guard let self = self else { return }
 
@@ -122,39 +128,60 @@ final class AppCoordinator {
                 // Wait for interval (e.g., 3 seconds)
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
 
+                Logger.shared.log(.flow, "🔔 Loop tick. Checking buffer...")
+
                 // Check if buffer has data
-                guard await self.contextBuffer.hasData() else {
+                let hasData = await self.contextBuffer.hasData()
+                guard hasData else {
+                    Logger.shared.log(.flow, "💤 Buffer empty, skipping annotation")
                     continue
                 }
 
                 // Consume buffer
                 guard let batch = await self.contextBuffer.consumeAndClear() else {
+                    Logger.shared.log(.flow, "⚠️ Buffer had data but consumeAndClear returned nil")
                     continue
                 }
 
-                Logger.shared.log("Consumer: Processing buffer batch (keystrokes: \(batch.keystrokes.count) chars)")
+                Logger.shared.log(.flow, "📋 Processing batch: \(batch.keystrokes.count) chars, screen=\(batch.screenFrame != nil)")
 
                 // Process with annotator
                 await self.processBufferBatch(batch)
             }
+
+            Logger.shared.log(.flow, "🛑 Consumer loop stopped")
         }
     }
 
     /// Process a consumed buffer batch through the annotator
     private func processBufferBatch(_ batch: BufferBatch) async {
+        Logger.shared.log(.flow, "➡️ Sending batch to annotator...")
+
         let result = await self.annotator.annotate(batch: batch)
         switch result {
         case .failure(let error):
-            Logger.shared.log("Annotate failed (consumer): \(error)")
+            Logger.shared.log(.flow, "❌ Annotation failed: \(error.localizedDescription)")
         case .success(let context):
             let taskId = self.stableTaskId(for: context)
-            if stateStore.wasDeclined(taskId) || stateStore.wasCompleted(taskId) { return }
+
+            if stateStore.wasDeclined(taskId) {
+                Logger.shared.log(.flow, "⏭️ Task was declined previously, skipping. ID: \(taskId.prefix(8))...")
+                return
+            }
+            if stateStore.wasCompleted(taskId) {
+                Logger.shared.log(.flow, "⏭️ Task was completed previously, skipping. ID: \(taskId.prefix(8))...")
+                return
+            }
+
             self.pushToNebula(context: context, taskId: taskId)
+
             let isNew = stateStore.updateCurrent(taskId: taskId)
             if isNew {
-                Logger.shared.log("New task detected: \(context.taskLabel) [\(taskId)]")
+                Logger.shared.log(.flow, "🆕 New task detected: '\(context.taskLabel)' [ID: \(taskId.prefix(8))...]")
                 overlay.showSuggestion(text: "Grok can help: \(context.taskLabel)")
                 overlay.showDecision(text: "Execute \(context.taskLabel)?")
+            } else {
+                Logger.shared.log(.flow, "♻️ Task already known, overlay remains visible")
             }
         }
     }

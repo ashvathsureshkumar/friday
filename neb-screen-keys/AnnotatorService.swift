@@ -16,8 +16,11 @@ final class AnnotatorService {
 
     /// Annotate using a BufferBatch (keystrokes + screen frame)
     func annotate(batch: BufferBatch) async -> Result<AnnotatedContext, Error> {
+        Logger.shared.log(.annotator, "📥 Annotation request started (keystrokes: \(batch.keystrokes.count) chars)")
+
         guard let frame = batch.screenFrame else {
             let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "No screen frame in batch"])
+            Logger.shared.log(.annotator, "❌ Annotation failed: No screen frame in batch")
             return .failure(err)
         }
 
@@ -25,8 +28,11 @@ final class AnnotatorService {
               let bitmap = NSBitmapImageRep(data: imageData),
               let pngData = bitmap.representation(using: .png, properties: [:]) else {
             let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to encode screen image"])
+            Logger.shared.log(.annotator, "❌ Annotation failed: Unable to encode screen image")
             return .failure(err)
         }
+
+        Logger.shared.log(.annotator, "Sending request to Grok (image: \(pngData.count / 1024)KB)...")
 
         let b64 = pngData.base64EncodedString()
         let attachment = GrokAttachment(type: "input_image", image_url: "data:image/png;base64,\(b64)")
@@ -49,15 +55,24 @@ final class AnnotatorService {
             grok.createResponse(request) { res in
                 switch res {
                 case .failure(let error):
+                    Logger.shared.log(.annotator, "❌ Grok API error: \(error.localizedDescription)")
                     cont.resume(returning: .failure(error))
                 case .success(let data):
                     guard let text = String(data: data, encoding: .utf8) else {
+                        Logger.shared.log(.annotator, "❌ Grok response decode failed")
                         cont.resume(returning: .failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
                         return
                     }
+
+                    // Log raw response (truncated)
+                    let truncated = text.count > 500 ? String(text.prefix(500)) + "..." : text
+                    Logger.shared.log(.annotator, "📨 Grok response (\(text.count) chars): \(truncated)")
+
                     let parsed = AnnotatorService.parseAnnotated(jsonText: text,
                                                                  fallbackApp: frame.appName,
                                                                  fallbackWindow: frame.windowTitle)
+
+                    Logger.shared.log(.annotator, "✅ Parsed result: Task='\(parsed.taskLabel)', Confidence=\(parsed.confidence), App=\(parsed.app)")
                     cont.resume(returning: .success(parsed))
                 }
             }
