@@ -79,7 +79,7 @@ The app requires API keys configured via environment variables. EnvLoader (EnvLo
 Required environment variables:
 - `GROK_API_KEY`: API key for Grok AI (x.ai) - should start with `xai-`
 - `NEBULA_API_KEY`: API key for Nebula memory service - should start with `neb_`
-- `NEBULA_COLLECTION_ID`: Collection ID for Nebula (UUID format)
+- `NEBULA_COLLECTION_ID`: **Optional** - Collection ID is now generated dynamically on launch. If provided, it will be replaced by the new collection created on startup.
 
 Example `.env`:
 ```bash
@@ -97,9 +97,10 @@ The app uses a **multi-layered Producer-Consumer** architecture with `AppCoordin
 
 - **AppCoordinator**: Orchestrates the entire workflow using a three-phase approach:
   - **Phase 1 - Producer (High-Speed)**: Event buffering (keystrokes, shortcuts, screen captures)
-  - **Phase 2 - Annotator (AI Pace)**: Processes buffer every 3 seconds, sends to Grok vision AI for analysis
+  - **Phase 2 - Annotator (AI Pace)**: Processes buffer every 2 seconds, sends to Grok vision AI for analysis
   - **Phase 3 - Fan-Out (Parallel Consumers)**: Broadcasts annotations to multiple independent consumers via `AnnotationBufferService`
-- **Flow**: Event → Context Buffer → (3s) → Annotator → **Annotation Buffer** → [Nebula Consumer + Execution Agent Consumer]
+- **Flow**: Event → Context Buffer → (2s) → Annotator → **Annotation Buffer** → [Nebula Consumer + Execution Agent Consumer]
+- **Chat Overlay**: Toggle with `~` key (keyCode 50) for interactive chat with Grok AI
 
 ### Annotation Buffer (Fan-Out Architecture)
 - **AnnotationBufferService** (Models.swift:56): Actor-based multicast streaming buffer
@@ -140,15 +141,16 @@ Four main services handle distinct responsibilities:
    - Simple single-path logic: always captures main display
 
 2. **AnnotatorService** (AnnotatorService.swift:25): 
-   - Sends **full desktop captures** to Grok AI with cursor focus indicator
-   - Base64-encoded PNG images showing complete workspace
-   - Uses `grok-2-vision-1212` model for vision + language understanding
-   - **Full Context Prompts**: Instructs AI to analyze entire screen and window relationships
-   - **Multi-Window Understanding**: Detects patterns like "code editor + documentation browser"
-   - **Cursor Priority**: Red circle indicates primary focus area within full context
+   - Sends **active window captures** to Grok AI (not full desktop - captures only the active window)
+   - Base64-encoded PNG images showing the focused window content
+   - **NOTE**: Currently uses `grok-4-fast` model (line 62) - this is a text-only model and may not properly process images. Should be updated to a vision model like `grok-2-vision-1212`
+   - **Active Window Focus**: Captures only the user's active window (no dock, menu bar, or other windows)
+   - **Clean Context Prompts**: Instructs AI to analyze the specific window content the user is focused on
+   - **OCR Everything**: Extracts function names, error codes, email recipients, search queries from visible text
+   - **Keystroke Context**: Includes recent keystroke activity count in prompts
    - Receives structured JSON with task analysis (task_label, confidence, summary, app, window_title)
    - Parses response into `AnnotatedContext` with fallback handling
-   - Few-shot examples demonstrate multi-window context analysis
+   - Few-shot examples demonstrate window content analysis
 
 3. **ExecutorService** (ExecutorService.swift:8): 
    - Generates quick suggestion previews for the cursor overlay using `grok-4-fast`
@@ -162,11 +164,12 @@ Four main services handle distinct responsibilities:
    - Extracts and executes AppleScript from triple-backtick fenced blocks
    - Uses `grok-4-fast` model for execution planning
 
-4. **EventMonitoring** (EventMonitoring.swift:8-83): 
+4. **EventMonitoring** (EventMonitoring.swift:8-88): 
    - Two monitors working in parallel:
-     - `EventMonitor`: Watches for specific keyboard shortcuts (Cmd+Tab, Cmd+Space)
+     - `EventMonitor`: Watches for specific keyboard shortcuts (Cmd+Tab, Cmd+Space) and chat toggle (`~` key, keyCode 50)
      - `KeystrokeMonitor`: Uses CGEventTap to detect all keydown events
    - Both feed into the context buffer for AI processing
+   - **Chat Toggle**: Press `~` (tilde/grave key) to toggle chat overlay on/off
 
 ### Buffer System
 - **ContextBufferService** (ContextBuffer.swift:16): Thread-safe actor that buffers real-time activity
@@ -213,11 +216,20 @@ Four main services handle distinct responsibilities:
     - Shows AI-generated action preview (e.g., "Type and run 'brew restart postgresql'")
     - Initially shows "Thinking..." while Grok generates suggestion
     - Updates asynchronously with specific, actionable suggestion
+    - Auto-hides after 3 seconds of inactivity
+    - Follows cursor position
   - **Decision Panel** (top-right):
     - 300x110 panel with clear task description
     - Shows "Execute automation for: [Task Label]"
     - Two buttons: "Yes, Execute" and "Not Now"
     - Multi-line wrapping for long task names
+    - Auto-hides after 5 seconds of inactivity
+- **ChatOverlayController** (ChatOverlayController.swift:58): Interactive chat interface
+  - Toggle with `~` key (keyCode 50)
+  - Full-screen overlay with message history
+  - Auto-hides after 10 seconds of inactivity
+  - Uses Grok AI (`grok-2-latest` model) for conversational responses
+  - Nebula-themed UI with glass morphism effects
 
 ### Logging System
 - **Logger** (Logger.swift:33): Centralized logging with categories
@@ -237,17 +249,20 @@ Four main services handle distinct responsibilities:
 5. `ContextBufferService.updateLatestScreen()` - Store latest frame
 6. **Buffer now contains**: accumulated keystrokes + latest screen frame
 
-### Consumer Flow (AI Processing Loop - 3 Second Interval)
-1. Timer tick every 3 seconds
+### Consumer Flow (AI Processing Loop - 2 Second Interval)
+1. Timer tick every 2 seconds
 2. Check if `ContextBufferService.hasData()`
-3. If data exists: `consumeAndClear()` → get `BufferBatch`
-4. Send batch to `AnnotatorService.annotate()`
-5. Grok vision model analyzes screen + keystroke context
-6. Parse response into `AnnotatedContext`
-7. **Publish to AnnotationBufferService** → broadcasts to all consumers
-8. **Parallel Consumer Execution**:
-   - **Nebula Consumer**: Stores annotation to memory service
-   - **Execution Agent Consumer**: Evaluates if automation is needed
+3. If data exists: **Capture fresh screenshot** before processing (ensures latest screen state)
+4. Update buffer with fresh screenshot
+5. `consumeAndClear()` → get `BufferBatch`
+6. **Save screenshot to assets folder** for debugging (with timestamp)
+7. Send batch to `AnnotatorService.annotate()`
+8. Grok vision model analyzes screen + keystroke context
+9. Parse response into `AnnotatedContext`
+10. **Publish to AnnotationBufferService** → broadcasts to all consumers
+11. **Parallel Consumer Execution**:
+    - **Nebula Consumer**: Stores annotation to memory service
+    - **Execution Agent Consumer**: Evaluates if automation is needed
 
 ### Nebula Consumer Flow (Parallel to Execution Agent)
 1. Subscribe to `AnnotationBufferService.makeStream()`
@@ -276,6 +291,7 @@ Four main services handle distinct responsibilities:
 3. Re-annotate with latest context via `AnnotatorService.annotate()`
 4. Search Nebula memories with task label via `NebulaClient.searchMemories()`
    - Retrieves top 5 relevant memories from past similar tasks
+   - Tracks memory IDs for cleanup after execution
 5. Build comprehensive execution prompt with:
    - Current task context (label, app, window, AI analysis, confidence)
    - User activity signals (keystroke count, shortcuts detected, activity patterns)
@@ -287,9 +303,10 @@ Four main services handle distinct responsibilities:
    - Interactive AppleScript with System Events (typing, clicking, pasting)
 8. Extract AppleScript from ```applescript code block
 9. Execute via `NSAppleScript.executeAndReturnError()`
-10. Store execution plan in Nebula with metadata
-11. Mark task as completed in state store
-12. Hide all overlays
+10. **Delete used memories** from Nebula to prevent infinite growth
+11. Store execution plan in Nebula with metadata
+12. Mark task as completed in state store
+13. Hide all overlays
 
 ## Important Implementation Details
 
@@ -301,8 +318,10 @@ The app uses a **three-phase architecture** with clear separation of concerns:
    - Throttles screen captures to 500ms minimum interval
    - Accumulates keystrokes and latest screen frame
 
-2. **Phase 2 - Annotator** (AI processing every 3 seconds):
+2. **Phase 2 - Annotator** (AI processing every 2 seconds):
+   - Captures fresh screenshot before processing (ensures latest screen state)
    - Consumes buffer batch and sends to Grok vision AI
+   - Saves screenshot to assets folder for debugging
    - Processes in background without blocking UI
    - Publishes `AnnotatedContext` to annotation buffer
 
@@ -323,10 +342,12 @@ The app uses a **three-phase architecture** with clear separation of concerns:
   - Throttle interval: 500ms minimum between screen captures
   - Keystrokes accumulated as dots (`.`) or shortcut markers (`[SHORTCUT:cmd-tab]`)
   - Screen frames captured and buffered without caching
-- **Consumer (AI Pace)**: Processes buffer every 3 seconds
+- **Consumer (AI Pace)**: Processes buffer every 2 seconds
+  - Captures fresh screenshot before each annotation cycle
   - Prevents blocking user interactions
   - Batches multiple events for efficient AI processing
   - Clears keystroke buffer after consumption (but keeps screen as baseline)
+  - Saves screenshots to assets folder for debugging
 - **Fan-Out (Parallel Consumers)**: Broadcasts annotations via AsyncStream
   - Nebula consumer stores to memory service
   - Execution agent evaluates and triggers UI
@@ -339,32 +360,34 @@ The app uses a **three-phase architecture** with clear separation of concerns:
 - All buffer operations use Swift actors for thread-safe concurrent access
 
 ### Screen Capture Specifics
-- Uses `OneShotFrameGrabber` (ScreenCaptureService.swift:~115) that implements `SCStreamOutput`
-- **Full Context Capture**: Always captures entire main display with all visible windows
-- **Simple Strategy**: Single code path with no fallbacks or window hunting
-- **Cursor Focus Visualization**: Draws red circle at cursor position to guide AI attention
-  - Circle specs: 40px radius, 4px stroke, red color (1.0, 0.0, 0.0, 0.9 alpha)
-  - Helps AI understand which window/area user is actively using
-  - Coordinate conversion: Global screen → Display-relative → Image coords
-  - Graceful fallback: Uses original image if cursor position unavailable
-- **Infinity Mirror Prevention**: Excludes own app using `Bundle.main.bundleIdentifier`
+- Uses `OneShotFrameGrabber` (ScreenCaptureService.swift:298) that implements `SCStreamOutput`
+- **Active Window Capture**: Prioritizes capturing the active window (frontmost application's main window)
+- **Fallback Strategy**: If no active window found (e.g., own app is frontmost), falls back to main display capture
+- **Window Detection**: Uses CGWindowListCopyWindowInfo to find active window by PID matching
+- **Active Window Filter**: Uses `SCContentFilter(desktopIndependentWindow:)` to capture ONLY the target window (excludes dock, menu bar, other windows)
+- **Main Display Filter**: Uses `SCContentFilter(display:excludingApplications:)` to capture entire display while excluding own app
+- **Infinity Mirror Prevention**: Excludes own app using `Bundle.main.bundleIdentifier` and PID matching
 - **No caching**: Each capture creates a new grabber instance for fresh frames
 - `firstFrame()` uses checked continuation that resolves when first frame arrives
-- Captures at native display resolution with BGRA pixel format
-- Gets frontmost app name and window title via NSWorkspace for metadata
-- Logs capture resolution and cursor coordinates for debugging
-- **Optional scaling**: Commented code available to scale down large displays (save tokens)
+- Captures at native window/display resolution with BGRA pixel format
+- Gets frontmost app name and window title via NSWorkspace/SCWindow for metadata
+- Logs capture resolution and window details for debugging
+- **Screenshot Saving**: Automatically saves screenshots to:
+  - Desktop folder: `~/Desktop/neb-screen-captures/`
+  - Assets folder: `{projectRoot}/assets/`
+  - Filename format: `capture_{timestamp}_{reason}.png`
 
 ### Grok AI Integration
-- **Annotator Model**: `grok-2-vision-1212` - Vision + language for understanding screen content
-  - Receives full desktop screenshots with cursor focus indicator (red circle)
-  - Prompt includes cursor-aware instructions: prioritize content near circle
-  - Implements "general relativity" principle: cursor warps attention space
-  - Few-shot examples demonstrate cursor-focused analysis
+- **Annotator Model**: `grok-4-fast` (AnnotatorService.swift:62) - **WARNING**: This is a text-only model but is being used with images. Should be updated to `grok-2-vision-1212` or similar vision model.
+  - Receives active window screenshots (not full desktop)
+  - Prompt focuses on window content analysis, OCR, and friction detection
+  - Includes keystroke activity count in context
+  - Few-shot examples demonstrate window content analysis (terminal errors, email composition, code editing)
 - **Executor Model**: `grok-4-fast` - Fast text model for suggestions and execution planning
+- **Chat Model**: `grok-2-latest` - Used for interactive chat overlay
 - Uses OpenAI-compatible Chat Completions API format
 - Image attachments via base64 data URLs: `data:image/png;base64,...`
-- Structured prompts with cursor context and few-shot examples for consistent JSON output
+- Structured prompts with window context and few-shot examples for consistent JSON output
 - **Actionable automation prompts** with 5 detailed examples of interactive AppleScript patterns
 
 ### AppleScript Execution Capabilities
@@ -433,6 +456,14 @@ The prompt includes task-specific patterns for Terminal, Code Editors, Browsers,
   - Retrieves top 5 relevant memories
   - Used to inform Grok's execution planning with historical patterns
   - Execution plans also stored separately with type="execution_plan"
+  - **Memory Cleanup**: Used memories are deleted after execution to prevent infinite collection growth
+
+- **Collection Management**:
+  - **Dynamic Collection Creation**: On app launch, deletes existing collection and creates a new one with unique name
+  - Collection name format: `neb-screen-keys-{timestamp}` to avoid conflicts
+  - Retry logic for collection creation (up to 3 attempts on 409 conflicts)
+  - Collection ID stored dynamically and updated via `setCollectionId()`
+  - **Demo Mode**: Clears all memories on launch for clean demo experience
 
 ### Permission Management
 - **Smart Permission Checking** (Permissions.swift:15):
@@ -528,13 +559,26 @@ If you see these warnings, grant the permissions in System Settings manually.
 
 **Solution:**
 - Update to current Grok models
-- Vision: `grok-2-vision-1212`
-- Text: `grok-4-fast` or `grok-2-1212`
+- Vision: `grok-2-vision-1212` (for image analysis)
+- Text: `grok-4-fast` or `grok-2-1212` (for text-only tasks)
 
-**Current Implementation**: Already using correct models
+**Current Implementation**: 
+- ⚠️ **AnnotatorService uses `grok-4-fast` which is text-only** - should be updated to `grok-2-vision-1212` for proper image analysis
+- ExecutorService correctly uses `grok-4-fast` for text-only execution planning
+- Chat uses `grok-2-latest` for conversational responses
 
 ### Issue: Screen Capture Shows Old/Stale Images
-**Solution:** Fixed - `OneShotFrameGrabber` no longer caches images. Each capture is fresh.
+**Solution:** Fixed - `OneShotFrameGrabber` no longer caches images. Each capture is fresh. Additionally, a fresh screenshot is captured right before each annotation cycle to ensure latest state.
+
+### Issue: Screenshots Saved to Assets Folder Are Empty
+**Symptoms:**
+- Screenshot files are created but are 0 bytes
+- Cannot open screenshots in image viewers
+
+**Solution:**
+- Fixed in `AppCoordinator.saveScreenshot()` - properly converts NSImage to PNG data before writing
+- Screenshots are saved to both `~/Desktop/neb-screen-captures/` and `{projectRoot}/assets/`
+- Filename format: `capture_{timestamp}_{reason}.png`
 
 ### Issue: Huge Black Spaces in Logs
 **Solution:** Fixed - Base64 images and large JSON payloads are now truncated in logs, only summaries shown.
@@ -548,22 +592,27 @@ If you see these warnings, grant the permissions in System Settings manually.
 
 ### December 2024 Updates
 
-#### 1. Full Context Capture Strategy (Latest)
-- **Simplified Architecture**: Removed ~200 lines of complex window detection code
-- **Main Display Capture**: Always captures entire main display with all windows
-- **Window Relationships**: AI can now understand multi-window task contexts
-- **Cursor Focus Indicator**: Red circle shows primary attention area within full context
-- **Infinity Mirror Prevention**: Excludes own app from capture using bundle ID
-- **No Fallbacks Needed**: Single reliable code path
+#### 1. Active Window Capture Strategy (Latest)
+- **Active Window Priority**: Captures the frontmost application's main window first
+- **Window Detection**: Uses CGWindowListCopyWindowInfo to find active window by PID
+- **Clean Window Capture**: Uses `desktopIndependentWindow` filter to capture ONLY the target window (no dock, menu bar, other windows)
+- **Fallback to Display**: If no active window found (e.g., own app is frontmost), falls back to main display capture
+- **Infinity Mirror Prevention**: Excludes own app using bundle ID and PID matching
+- **Screenshot Saving**: Automatically saves all captures to desktop and assets folder for debugging
 - **Benefits**:
-  - Simpler code (easier to maintain)
-  - Full workspace context for AI
-  - Window relationship understanding (code + docs, error + search)
-  - No edge cases with window detection
-  - Consistent performance
-  - Better multi-tasking detection
+  - Clean, focused context for AI analysis
+  - No distractions from other windows
+  - Better OCR and text extraction
+  - Easier to understand user's exact focus
+  - Debugging support via saved screenshots
 
-#### 2. Cursor Focus Visualization & Full Desktop Capture
+#### 2. Chat Overlay & Interactive Features
+- **Chat Toggle**: Press `~` (tilde/grave key, keyCode 50) to toggle chat overlay
+- **ChatOverlayController**: Full-featured chat interface with message history
+- **Auto-hide Timers**: Overlays auto-hide after inactivity (suggestion: 3s, decision: 5s, chat: 10s)
+- **Nebula-themed UI**: Glass morphism effects with Nebula brand colors
+
+#### 3. Dynamic Nebula Collection Management
 - **Decoupled Consumers**: Introduced `AnnotationBufferService` actor for multicast streaming
 - **Parallel Processing**: Nebula storage and Execution Agent now run concurrently
 - **Non-Blocking Annotator**: AI loop never waits for network calls or UI updates
@@ -577,40 +626,40 @@ If you see these warnings, grant the permissions in System Settings manually.
   - UI updates happen immediately without waiting for memory storage
   - Better separation of concerns and testability
 
-#### 2. Enhanced HTTP Status Handling
+#### 4. Enhanced HTTP Status Handling
 - **Accept All 2xx Codes**: Changed from checking `== 200` to accepting `200...299` range
 - **202 Accepted Support**: Nebula's async processing now properly handled
 - **Special Logging**: 202 responses get success message: "✅ Memory queued successfully (Async processing)"
 - **No False Alarms**: Eliminated incorrect error logs for valid 2xx responses
 
-#### 3. Comprehensive Context Flow (Annotator → Nebula → Executor)
+#### 5. Comprehensive Context Flow (Annotator → Nebula → Executor)
 - **Full Information Pipeline**: All curated information from Grok Annotator is now stored in Nebula and retrieved by Executor
 - **Enhanced Storage**: Now stores task details, AI analysis, keystroke patterns, shortcuts detected, confidence scores, and timestamps
 - **Rich Executor Prompts**: Executor receives comprehensive context including current task, user activity signals, and historical patterns
 - **Metadata Conversion**: Automatic conversion of all metadata values to strings for API compatibility
 
-#### 4. Actionable UI Automation
+#### 6. Actionable UI Automation
 - **Interactive AppleScript**: Executor generates scripts that perform real UI interactions
 - **System Events Integration**: Uses macOS System Events for keyboard input, mouse clicks, clipboard operations
 - **5 Comprehensive Examples**: Prompt includes detailed examples for Terminal commands, code formatting, copy/paste, menu navigation, and multi-step workflows
 - **Task-Specific Patterns**: Guidance for different task types (Terminal, Code Editor, Browser, Documentation, Communication)
 - **Safety Guidelines**: Explicit instructions to avoid destructive actions, use proper delays, and be specific to detected context
 
-#### 5. Smart Overlay System
+#### 7. Smart Overlay System
 - **AI-Generated Suggestions**: Cursor-side panel shows specific, actionable suggestions before execution
 - **Dynamic Updates**: Shows "Thinking..." initially, then updates with Grok's suggestion
 - **Preview Format**: "Type and run 'brew restart postgresql'" instead of generic "Can help with debugging"
 - **Enhanced Decision Panel**: Shows task label with clearer buttons ("Yes, Execute" / "Not Now")
 - **Multi-line Support**: Both panels support text wrapping for longer descriptions
 
-#### 6. Permission Persistence Fix
+#### 8. Permission Persistence Fix
 - **Disabled Code Signing**: Debug builds no longer use automatic code signing
 - **One-Time Prompts**: Accessibility permission only prompted once (first launch)
 - **Silent Checks**: Subsequent launches check permissions without prompting users
 - **Build Consistency**: Same code signature across rebuilds = permissions persist
 - **Better UX**: No more repeated permission dialogs on every rebuild
 
-#### 5. Nebula API Integration (Per Official Docs)
+#### 9. Nebula API Integration (Per Official Docs)
 - **Correct Endpoints**: Using `https://api.nebulacloud.app/v1/memories` and `/v1/search`
 - **Type-Safe Structs**: `NebulaMemoryRequest`, `NebulaSearchRequest`, `NebulaMemoryResponse`
 - **Proper Field Names**: `collection_ref` (not `collection_id`), `engram_type` ("document" or "conversation")
@@ -618,14 +667,24 @@ If you see these warnings, grant the permissions in System Settings manually.
 - **Error Handling**: Proper HTTP status checking and JSON-RPC error handling
 - **Comprehensive Logging**: Request/response logging without massive payloads
 
-#### 6. Clean Logging System
+#### 10. Clean Logging System
 - **No Emojis**: Removed all emoji characters from logs for professional output
 - **Smart Truncation**: Base64 images and large JSON payloads logged as summaries only
 - **Readable Format**: `[HH:mm:ss.SSS] [Category] message`
 - **Categorized**: Event, Buffer, Annotator, Executor, Nebula, Flow, Capture, System
 - **Debug-Friendly**: Shows HTTP status codes, payload sizes, but not 500KB+ base64 strings
 
-#### 7. Bug Fixes
+#### 11. Memory Cleanup After Execution
+- **Automatic Deletion**: Used memories are deleted from Nebula after task execution
+- **Prevents Growth**: Keeps collection size manageable by removing memories that were used
+- **Async Cleanup**: Deletion happens asynchronously without blocking execution flow
+
+#### 12. Fresh Screenshot Capture Before Annotation
+- **Latest State**: Captures fresh screenshot right before each annotation cycle
+- **Ensures Accuracy**: Always uses the most recent screen state for AI analysis
+- **Debug Support**: Saves screenshots to assets folder with timestamps
+
+#### 13. Bug Fixes
 - **Screen Capture Caching**: Fixed `OneShotFrameGrabber` caching first image - now captures fresh frames every time
 - **Grok Model Deprecation**: Updated from deprecated `grok-beta` to `grok-4-fast` and `grok-2-vision-1212`
 - **Nebula Validation**: Fixed 422 errors by using correct field names and engram_type values
@@ -644,3 +703,12 @@ If you see these warnings, grant the permissions in System Settings manually.
 3. **Rebuild Once**: After code changes, rebuild and permissions should persist
 4. **Reset Permissions**: Delete app from System Settings and use `Permissions.resetPromptFlag()` to test first-run experience
 5. **Nebula Testing**: Use curl to test Nebula API credentials independently before debugging app
+6. **Screenshot Debugging**: Check `~/Desktop/neb-screen-captures/` and `assets/` folder for saved screenshots
+7. **Chat Toggle**: Press `~` key to toggle chat overlay for interactive testing
+8. **Collection Management**: App creates new Nebula collection on each launch (demo mode) - memories are cleared automatically
+
+## Known Issues & Future Improvements
+
+1. **Annotator Model Mismatch**: `AnnotatorService` uses `grok-4-fast` (text-only) but sends images. Should be updated to `grok-2-vision-1212` or similar vision model.
+2. **Collection Clearing**: App clears all Nebula memories on launch for demo purposes. Consider making this optional or configurable.
+3. **Screenshot Saving**: Hardcoded project root path in `saveScreenshot()`. Should use dynamic path detection.

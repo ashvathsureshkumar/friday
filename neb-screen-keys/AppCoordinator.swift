@@ -10,6 +10,8 @@ final class AppCoordinator {
     private let stateStore = TaskStateStore()
     private let eventMonitor = EventMonitor()
     private let keystrokeMonitor = KeystrokeMonitor()
+    private let spaceMonitor = SpaceMonitor()
+    private let mouseMonitor = MouseMonitor()
     private let captureService = ScreenCaptureService()
     private let overlay = OverlayController()
     private let chatOverlay = ChatOverlayController()
@@ -26,6 +28,8 @@ final class AppCoordinator {
     // MARK: - Producer Flow State
     private var lastScreenCaptureTime: Date?
     private let screenCaptureThrottleInterval: TimeInterval = 0.5 // 500ms throttle
+    private var lastSpaceChangeTime: Date?
+    private var lastAppSwitchTime: Date?
     private var consumerTask: Task<Void, Never>?
     private var nebulaConsumerTask: Task<Void, Never>?
     private var executionConsumerTask: Task<Void, Never>?
@@ -88,6 +92,42 @@ final class AppCoordinator {
             }
             self.keystrokeMonitor.start()
 
+            // Space/App change monitor - triggers capture on context switches
+            self.spaceMonitor.onChange = { [weak self] reason in
+                Logger.shared.log(.event, "Space/app change detected: \(reason)")
+                guard let self = self else { return }
+                
+                // Always capture space changes (they're important context switches)
+                // Only deduplicate app_switch if space_change just happened (space_change takes priority)
+                let now = Date()
+                if reason == "space_change" {
+                    self.lastSpaceChangeTime = now
+                    // Always capture space changes - they're important
+                    self.captureAndBuffer(reason: reason)
+                } else if reason == "app_switch" {
+                    self.lastAppSwitchTime = now
+                    // If space change happened very recently (< 200ms), skip app switch (space change already captured)
+                    if let lastSpaceChange = self.lastSpaceChangeTime,
+                       now.timeIntervalSince(lastSpaceChange) < 0.2 {
+                        Logger.shared.log(.event, "App switch skipped (space change captured recently)")
+                        return
+                    }
+                    // Otherwise, capture the app switch
+                    self.captureAndBuffer(reason: reason)
+                }
+            }
+            self.spaceMonitor.start()
+
+            // Mouse click monitor - triggers capture on user clicks
+            self.mouseMonitor.onClick = { [weak self] in
+                Logger.shared.log(.event, "Mouse click detected")
+                self?.captureAndBuffer(reason: "user_click")
+            }
+            self.mouseMonitor.start()
+
+            // Clear assets folder on launch to prevent screenshot buildup
+            self.clearAssetsFolder()
+
             // Clear Nebula memories on launch FIRST (for demo purposes)
             // This must complete before starting consumers to ensure collection exists
             self.clearNebulaMemories { [weak self] success in
@@ -142,8 +182,12 @@ final class AppCoordinator {
         Logger.shared.log(.capture, "🔍 captureAndBuffer called with reason: \(reason)")
         
         // Throttle screen captures to avoid performance hits
+        // BUT: Allow space_change and user_click to bypass throttling (they're important user actions)
+        let shouldThrottle = reason != "space_change" && reason != "user_click"
+        
         let now = Date()
-        if let lastCapture = lastScreenCaptureTime,
+        if shouldThrottle,
+           let lastCapture = lastScreenCaptureTime,
            now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
             // Skip this capture, too soon
             Logger.shared.log(.capture, "⏭️ Capture skipped (throttled). Reason: \(reason), lastCapture: \(lastCapture.timeIntervalSinceNow) seconds ago")
@@ -439,6 +483,29 @@ final class AppCoordinator {
     }
     
     // MARK: - Debug Helpers
+    
+    /// Clear the assets folder to prevent screenshot buildup
+    private func clearAssetsFolder() {
+        let projectRoot = "/Users/vagminviswanathan/Desktop/happyNebula/friday"
+        let assetsURL = URL(fileURLWithPath: projectRoot).appendingPathComponent("assets")
+        
+        guard FileManager.default.fileExists(atPath: assetsURL.path) else {
+            Logger.shared.log(.capture, "📁 Assets folder doesn't exist, skipping clear")
+            return
+        }
+        
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: assetsURL, includingPropertiesForKeys: nil, options: [])
+            var deletedCount = 0
+            for fileURL in contents {
+                try FileManager.default.removeItem(at: fileURL)
+                deletedCount += 1
+            }
+            Logger.shared.log(.capture, "🧹 Cleared assets folder: deleted \(deletedCount) file(s)")
+        } catch {
+            Logger.shared.log(.capture, "⚠️ Failed to clear assets folder: \(error.localizedDescription)")
+        }
+    }
     
     /// Save screenshot to desktop folder and assets folder for debugging
     private func saveScreenshot(_ image: NSImage, reason: String) {

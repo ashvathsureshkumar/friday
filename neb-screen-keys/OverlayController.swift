@@ -32,20 +32,20 @@ final class OverlayController {
     private let glowBorderWidth: CGFloat = 2
 
     func showSuggestion(text: String, enableKeyboardShortcuts: Bool = false) {
+        Logger.shared.log(.executor, "📱 Showing suggestion overlay: '\(text)'")
         if panel == nil {
             panel = makePanel()
+            Logger.shared.log(.executor, "✅ Created new suggestion panel")
         }
         if let panel = panel, let label = panel.contentView?.viewWithTag(100) as? NSTextField {
             label.stringValue = text
             positionPanelNearCursor(panel: panel)
             panel.orderFrontRegardless()
+            Logger.shared.log(.executor, "✅ Suggestion panel ordered front (level: \(panel.level.rawValue))")
             startMouseMonitor()
             startCursorTimer()
-
-            // Enable keyboard shortcuts for cursor-style popups (⌘Y to accept, ⌘N to dismiss)
-            if enableKeyboardShortcuts {
-                startKeyboardMonitor()
-            }
+        } else {
+            Logger.shared.log(.executor, "❌ Failed to show suggestion: panel or label is nil")
         }
     }
 
@@ -56,22 +56,22 @@ final class OverlayController {
     }
 
     func showDecision(text: String) {
+        Logger.shared.log(.executor, "📱 Showing decision overlay: '\(text)'")
         if promptPanel == nil {
             promptPanel = makeDecisionPanel()
+            Logger.shared.log(.executor, "✅ Created new decision panel")
         }
         if let promptPanel = promptPanel,
            let label = promptPanel.contentView?.viewWithTag(100) as? NSTextField {
             label.stringValue = text
             positionDecisionTopRight(panel: promptPanel)
             promptPanel.orderFrontRegardless()
-
-            // Focus the panel so keyboard shortcuts work immediately
-            promptPanel.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-
+            Logger.shared.log(.executor, "✅ Decision panel ordered front (level: \(promptPanel.level.rawValue))")
             startKeyboardMonitor()
             startClickOutsideMonitor()
             startDecisionTimer()
+        } else {
+            Logger.shared.log(.executor, "❌ Failed to show decision: panel or label is nil")
         }
     }
 
@@ -285,10 +285,11 @@ final class OverlayController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.isFloatingPanel = true
-        panel.level = .floating
+        panel.level = .screenSaver  // Higher level to ensure visibility above all windows
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.hasShadow = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
         contentView.wantsLayer = true
@@ -374,10 +375,10 @@ final class OverlayController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.isFloatingPanel = true
-        panel.level = .statusBar
+        panel.level = .screenSaver  // Higher level to ensure visibility above all windows
         panel.hidesOnDeactivate = false
         panel.hasShadow = true
-        panel.becomesKeyOnlyIfNeeded = false  // Allow panel to become key window
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
         contentView.wantsLayer = true
