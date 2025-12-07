@@ -52,10 +52,8 @@ final class ScreenCaptureService {
 @available(macOS 14.0, *)
 private final class OneShotFrameGrabber: NSObject, SCStreamOutput {
     private var continuation: CheckedContinuation<CGImage, Error>?
-    private var cgImage: CGImage?
-
+    
     func firstFrame() async throws -> CGImage {
-        if let cgImage { return cgImage }
         return try await withCheckedThrowingContinuation { cont in
             continuation = cont
         }
@@ -63,13 +61,14 @@ private final class OneShotFrameGrabber: NSObject, SCStreamOutput {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard outputType == .screen,
-              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let continuation = continuation else { return }
+        
         let ciImage = CIImage(cvImageBuffer: imageBuffer)
         let context = CIContext()
         if let cg = context.createCGImage(ciImage, from: ciImage.extent) {
-            cgImage = cg
-            continuation?.resume(returning: cg)
-            continuation = nil
+            continuation.resume(returning: cg)
+            self.continuation = nil
         }
     }
 }

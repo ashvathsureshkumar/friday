@@ -10,9 +10,11 @@ final class EventMonitor {
     var onShortcut: ((String) -> Void)?
 
     func start() {
+        Logger.shared.log(.event, "EventMonitor starting...")
         let mask: NSEvent.EventTypeMask = [.keyDown, .flagsChanged]
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: handle(event:)) {
             monitors.append(monitor)
+            Logger.shared.log(.event, "EventMonitor active. Listening for shortcuts.")
         }
     }
 
@@ -24,8 +26,10 @@ final class EventMonitor {
     private func handle(event: NSEvent) {
         if event.type == .keyDown {
             if event.modifierFlags.contains(.command) && event.keyCode == 48 {
+                Logger.shared.log(.event, "Shortcut detected: Cmd+Tab (keyCode=48)")
                 onShortcut?("cmd-tab")
             } else if event.modifierFlags.contains(.command) && event.keyCode == 49 {
+                Logger.shared.log(.event, "Shortcut detected: Cmd+Space (keyCode=49)")
                 onShortcut?("cmd-space")
             }
         }
@@ -38,6 +42,7 @@ final class KeystrokeMonitor {
     var onKeyEvent: (() -> Void)?
 
     func start() {
+        Logger.shared.log(.event, "KeystrokeMonitor starting...")
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
         if let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
                                        place: .headInsertEventTap,
@@ -46,6 +51,8 @@ final class KeystrokeMonitor {
                                        callback: { _, type, event, refcon in
                                            if type == .keyDown, let refcon = refcon {
                                                let monitor = Unmanaged<KeystrokeMonitor>.fromOpaque(refcon).takeUnretainedValue()
+                                               // Note: Logging every keystroke would be too verbose
+                                               // Only logging on buffer append in ContextBufferService
                                                monitor.onKeyEvent?()
                                            }
                                            return Unmanaged.passUnretained(event)
@@ -56,7 +63,10 @@ final class KeystrokeMonitor {
             if let source = runLoopSource {
                 CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
                 CGEvent.tapEnable(tap: tap, enable: true)
+                Logger.shared.log(.event, "KeystrokeMonitor active. CGEventTap enabled.")
             }
+        } else {
+            Logger.shared.log(.event, "KeystrokeMonitor failed to create event tap (check Accessibility permissions)")
         }
     }
 
