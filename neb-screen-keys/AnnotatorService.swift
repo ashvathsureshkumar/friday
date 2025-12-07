@@ -14,13 +14,13 @@ final class AnnotatorService {
         self.capture = capture
     }
 
-    func annotate(completion: @escaping (Result<AnnotatedContext, Error>) -> Void) {
-        guard let frame = capture.captureActiveScreen(),
+    func annotate() async -> Result<AnnotatedContext, Error> {
+        guard let frame = await capture.captureActiveScreen(),
               let imageData = frame.image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: imageData),
               let pngData = bitmap.representation(using: .png, properties: [:]) else {
-            completion(.failure(NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to capture screen"])))
-            return
+            let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to capture screen"])
+            return .failure(err)
         }
 
         let b64 = pngData.base64EncodedString()
@@ -39,21 +39,24 @@ final class AnnotatorService {
             stream: false
         )
 
-        grok.createResponse(request) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let data):
-                guard let text = String(data: data, encoding: .utf8) else {
-                    completion(.failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
-                    return
+        let result = await withCheckedContinuation { (cont: CheckedContinuation<Result<AnnotatedContext, Error>, Never>) in
+            grok.createResponse(request) { res in
+                switch res {
+                case .failure(let error):
+                    cont.resume(returning: .failure(error))
+                case .success(let data):
+                    guard let text = String(data: data, encoding: .utf8) else {
+                        cont.resume(returning: .failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
+                        return
+                    }
+                    let parsed = AnnotatorService.parseAnnotated(jsonText: text,
+                                                                 fallbackApp: frame.appName,
+                                                                 fallbackWindow: frame.windowTitle)
+                    cont.resume(returning: .success(parsed))
                 }
-                let parsed = AnnotatorService.parseAnnotated(jsonText: text,
-                                                             fallbackApp: frame.appName,
-                                                             fallbackWindow: frame.windowTitle)
-                completion(.success(parsed))
             }
         }
+        return result
     }
 
     private static func parseAnnotated(jsonText: String, fallbackApp: String, fallbackWindow: String) -> AnnotatedContext {

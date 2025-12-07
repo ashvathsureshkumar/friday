@@ -35,6 +35,7 @@ final class AppCoordinator {
     }
 
     func start() {
+        Logger.shared.log("Coordinator start")
         eventMonitor.onShortcut = { [weak self] _ in
             self?.maybeAnnotate(reason: "shortcut")
         }
@@ -48,17 +49,19 @@ final class AppCoordinator {
     }
 
     private func maybeAnnotate(reason: String) {
-        annotator.annotate { [weak self] result in
+        Task {
+            let result = await annotator.annotate()
             guard let self else { return }
             switch result {
-            case .failure:
-                break
+            case .failure(let error):
+                Logger.shared.log("Annotate failed (\(reason)): \(error)")
             case .success(let context):
                 let taskId = self.stableTaskId(for: context)
                 if stateStore.wasDeclined(taskId) || stateStore.wasCompleted(taskId) { return }
                 self.pushToNebula(context: context, taskId: taskId)
                 let isNew = stateStore.updateCurrent(taskId: taskId)
                 if isNew {
+                    Logger.shared.log("New task detected: \(context.taskLabel) [\(taskId)]")
                     overlay.showSuggestion(text: "Grok can help: \(context.taskLabel)")
                     overlay.showDecision(text: "Execute \(context.taskLabel)?")
                 }
@@ -68,17 +71,20 @@ final class AppCoordinator {
 
     private func executeCurrentTask() {
         guard let taskId = stateStore.currentTaskId else { return }
-        annotator.annotate { [weak self] result in
+        Logger.shared.log("Execute requested for task \(taskId)")
+        Task {
+            let result = await annotator.annotate()
             guard let self else { return }
             switch result {
-            case .failure:
-                break
+            case .failure(let error):
+                Logger.shared.log("Annotate before execute failed: \(error)")
             case .success(let context):
                 self.executor.planAndExecute(task: context) { execResult in
                     switch execResult {
-                    case .failure:
-                        break
+                    case .failure(let error):
+                        Logger.shared.log("Plan/execute failed: \(error)")
                     case .success(let plan):
+                        Logger.shared.log("Execution plan stored for \(taskId)")
                         self.stateStore.markCompleted(taskId: taskId)
                         self.pushExecutionResult(taskId: taskId, plan: plan)
                         self.overlay.hideAll()

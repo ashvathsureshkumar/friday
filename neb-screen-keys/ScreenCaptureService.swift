@@ -10,18 +10,9 @@ import AVFoundation
 final class ScreenCaptureService {
     private let captureQueue = DispatchQueue(label: "screen-capture.queue")
 
-    func captureActiveScreen() -> ScreenFrame? {
+    func captureActiveScreen() async -> ScreenFrame? {
         guard #available(macOS 14.0, *) else { return nil }
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var capturedFrame: ScreenFrame?
-
-        Task {
-            capturedFrame = await self.captureWithScreenCaptureKit()
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return capturedFrame
+        return await captureWithScreenCaptureKit()
     }
 
     @available(macOS 14.0, *)
@@ -52,7 +43,7 @@ final class ScreenCaptureService {
             let windowTitle = frontApp?.localizedName ?? "Unknown Window"
             return ScreenFrame(image: image, appName: appName, windowTitle: windowTitle)
         } catch {
-            print("ScreenCaptureKit error: \(error)")
+            Logger.shared.log("ScreenCaptureKit error: \(error)")
             return nil
         }
     }
@@ -60,13 +51,14 @@ final class ScreenCaptureService {
 
 @available(macOS 14.0, *)
 private final class OneShotFrameGrabber: NSObject, SCStreamOutput {
-    private let semaphore = DispatchSemaphore(value: 0)
+    private var continuation: CheckedContinuation<CGImage, Error>?
     private var cgImage: CGImage?
 
     func firstFrame() async throws -> CGImage {
-        _ = semaphore.wait(timeout: .now() + 2)
         if let cgImage { return cgImage }
-        throw NSError(domain: "capture", code: -1, userInfo: [NSLocalizedDescriptionKey: "No frame captured"])
+        return try await withCheckedThrowingContinuation { cont in
+            continuation = cont
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
@@ -76,7 +68,8 @@ private final class OneShotFrameGrabber: NSObject, SCStreamOutput {
         let context = CIContext()
         if let cg = context.createCGImage(ciImage, from: ciImage.extent) {
             cgImage = cg
-            semaphore.signal()
+            continuation?.resume(returning: cg)
+            continuation = nil
         }
     }
 }
