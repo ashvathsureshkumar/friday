@@ -15,7 +15,7 @@ struct NebulaMemoryRequest: Codable {
     let engram_type: String         // Required field for memory type
     
     enum CodingKeys: String, CodingKey {
-        case content
+        case content = "raw_text"
         case metadata
         case collection_ref
         case engram_type
