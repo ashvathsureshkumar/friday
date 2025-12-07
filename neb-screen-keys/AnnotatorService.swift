@@ -14,23 +14,82 @@ final class AnnotatorService {
         self.capture = capture
     }
 
-    func annotate() async -> Result<AnnotatedContext, Error> {
-        guard let frame = await capture.captureActiveScreen(),
-              let imageData = frame.image.tiffRepresentation,
+    /// Annotate using a BufferBatch (keystrokes + screen frame)
+    func annotate(batch: BufferBatch) async -> Result<AnnotatedContext, Error> {
+        guard let frame = batch.screenFrame else {
+            let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "No screen frame in batch"])
+            return .failure(err)
+        }
+
+        guard let imageData = frame.image.tiffRepresentation,
               let bitmap = NSBitmapImageRep(data: imageData),
               let pngData = bitmap.representation(using: .png, properties: [:]) else {
-            let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to capture screen"])
+            let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to encode screen image"])
             return .failure(err)
         }
 
         let b64 = pngData.base64EncodedString()
         let attachment = GrokAttachment(type: "input_image", image_url: "data:image/png;base64,\(b64)")
-                let prompt = """
+
+        // Build prompt with keystroke context
+        let prompt = buildPromptWithKeystrokes(frame: frame, keystrokes: batch.keystrokes)
+
+        let request = GrokRequest(
+            model: "grok-2-latest",
+            messages: [
+                GrokMessage(role: "user", content: [
+                    GrokMessagePart(type: "text", text: prompt)
+                ])
+            ],
+            attachments: [attachment],
+            stream: false
+        )
+
+        let result = await withCheckedContinuation { (cont: CheckedContinuation<Result<AnnotatedContext, Error>, Never>) in
+            grok.createResponse(request) { res in
+                switch res {
+                case .failure(let error):
+                    cont.resume(returning: .failure(error))
+                case .success(let data):
+                    guard let text = String(data: data, encoding: .utf8) else {
+                        cont.resume(returning: .failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
+                        return
+                    }
+                    let parsed = AnnotatorService.parseAnnotated(jsonText: text,
+                                                                 fallbackApp: frame.appName,
+                                                                 fallbackWindow: frame.windowTitle)
+                    cont.resume(returning: .success(parsed))
+                }
+            }
+        }
+        return result
+    }
+
+    /// Legacy method - capture screen and annotate (for backward compatibility)
+    func annotate() async -> Result<AnnotatedContext, Error> {
+        guard let frame = await capture.captureActiveScreen() else {
+            let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to capture screen"])
+            return .failure(err)
+        }
+
+        // Use the new method with empty keystrokes
+        let batch = BufferBatch(keystrokes: "", screenFrame: frame, timestamp: Date())
+        return await annotate(batch: batch)
+    }
+
+    /// Build the Grok prompt with keystroke context included
+    private func buildPromptWithKeystrokes(frame: ScreenFrame, keystrokes: String) -> String {
+        let keystrokeSection = keystrokes.isEmpty ? "" : """
+
+        3. **Recent Keystrokes:** \(keystrokes.count) characters of activity detected. This represents user interaction intensity.
+        """
+
+        return """
         You are the **Cortex** of an intelligent OS agent. Your capability is **Visual Intent Understanding**.
 
         **YOUR INPUTS:**
         1. **Current Screen:** A screenshot of the user's macOS desktop.
-        2. **Metadata:** Active App Name (\(frame.appName)), Window Title (\(frame.windowTitle)).
+        2. **Metadata:** Active App Name (\(frame.appName)), Window Title (\(frame.windowTitle)).\(keystrokeSection)
 
         **YOUR OBJECTIVE:**
         Analyze the screenshot to produce a structured "AnnotatedContext" JSON object. This data is fed directly into a Swift parser, so the schema must be exact.
@@ -39,7 +98,7 @@ final class AnnotatorService {
         1. **Ignore Background Noise:** Focus ONLY on the Active Window defined in the metadata. Ignore background apps.
         2. **OCR & Specificity:** Do not just say "User is coding." Read the text. Extract specific function names, variable names, error codes (e.g., "Postgres 5432"), or email recipients.
         3. **Detect Friction:** High friction includes: Red error text, "Connection Refused", repeatedly refreshing a page, or searching for "how to fix..."
-        4. **Continuity Check:** Compare the Current Screen to the `Short-Term Memory`. If the task has changed, note the context switch.
+        4. **Keystroke Context:** If keystrokes are present, use them to infer activity intensity. High keystroke count suggests active work, low suggests passive browsing.
         5. **Strict Output:** Return ONLY raw JSON. Do not use Markdown blocks (```json). Do not add conversational text.
 
         **OUTPUT SCHEMA:**
@@ -110,35 +169,6 @@ final class AnnotatorService {
         "window_title": "Hacker News"
         }
         """
-        let request = GrokRequest(
-            model: "grok-2-latest",
-            messages: [
-                GrokMessage(role: "user", content: [
-                    GrokMessagePart(type: "text", text: prompt)
-                ])
-            ],
-            attachments: [attachment],
-            stream: false
-        )
-
-        let result = await withCheckedContinuation { (cont: CheckedContinuation<Result<AnnotatedContext, Error>, Never>) in
-            grok.createResponse(request) { res in
-                switch res {
-                case .failure(let error):
-                    cont.resume(returning: .failure(error))
-                case .success(let data):
-                    guard let text = String(data: data, encoding: .utf8) else {
-                        cont.resume(returning: .failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
-                        return
-                    }
-                    let parsed = AnnotatorService.parseAnnotated(jsonText: text,
-                                                                 fallbackApp: frame.appName,
-                                                                 fallbackWindow: frame.windowTitle)
-                    cont.resume(returning: .success(parsed))
-                }
-            }
-        }
-        return result
     }
 
     private static func parseAnnotated(jsonText: String, fallbackApp: String, fallbackWindow: String) -> AnnotatedContext {

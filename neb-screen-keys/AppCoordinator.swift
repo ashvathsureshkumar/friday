@@ -12,10 +12,16 @@ final class AppCoordinator {
     private let keystrokeMonitor = KeystrokeMonitor()
     private let captureService = ScreenCaptureService()
     private let overlay = OverlayController()
+    private let contextBuffer = ContextBufferService()
 
     private let annotator: AnnotatorService
     private let executor: ExecutorService
     private let nebula: NebulaClient
+
+    // MARK: - Producer Flow State
+    private var lastScreenCaptureTime: Date?
+    private let screenCaptureThrottleInterval: TimeInterval = 0.5 // 500ms throttle
+    private var consumerTask: Task<Void, Never>?
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
@@ -45,36 +51,110 @@ final class AppCoordinator {
                 Logger.shared.log("Accessibility permission not granted; keystroke monitoring and automation will fail.")
             }
 
-            self.eventMonitor.onShortcut = { [weak self] _ in
-                self?.maybeAnnotate(reason: "shortcut")
+            // PRODUCER FLOW: Event monitors push to buffer instead of direct annotation
+            self.eventMonitor.onShortcut = { [weak self] shortcut in
+                self?.handleProducerEvent(shortcut: shortcut)
             }
             self.eventMonitor.start()
+
             self.keystrokeMonitor.onKeyEvent = { [weak self] in
-                self?.maybeAnnotate(reason: "keystroke")
+                self?.handleKeystroke()
             }
             self.keystrokeMonitor.start()
 
-            self.maybeAnnotate(reason: "launch")
+            // CONSUMER FLOW: Start the periodic AI processing loop
+            self.startAnnotatorLoop()
+
+            // Initial screen capture on launch
+            self.captureAndBuffer(reason: "launch")
         }
     }
 
-    private func maybeAnnotate(reason: String) {
+    // MARK: - Producer Flow (High Speed)
+
+    /// Handle shortcut events by buffering keystroke marker and triggering screen capture
+    private func handleProducerEvent(shortcut: String) {
         Task { [weak self] in
             guard let self = self else { return }
-            let result = await self.annotator.annotate()
-            switch result {
-            case .failure(let error):
-                Logger.shared.log("Annotate failed (\(reason)): \(error)")
-            case .success(let context):
-                let taskId = self.stableTaskId(for: context)
-                if stateStore.wasDeclined(taskId) || stateStore.wasCompleted(taskId) { return }
-                self.pushToNebula(context: context, taskId: taskId)
-                let isNew = stateStore.updateCurrent(taskId: taskId)
-                if isNew {
-                    Logger.shared.log("New task detected: \(context.taskLabel) [\(taskId)]")
-                    overlay.showSuggestion(text: "Grok can help: \(context.taskLabel)")
-                    overlay.showDecision(text: "Execute \(context.taskLabel)?")
+            await self.contextBuffer.append(keystrokes: "[SHORTCUT:\(shortcut)]")
+            self.captureAndBuffer(reason: "shortcut")
+        }
+    }
+
+    /// Handle keystroke events by buffering and triggering throttled screen capture
+    private func handleKeystroke() {
+        Task { [weak self] in
+            guard let self = self else { return }
+            await self.contextBuffer.append(keystrokes: ".")
+            self.captureAndBuffer(reason: "keystroke")
+        }
+    }
+
+    /// Capture screen and buffer it (with throttling)
+    private func captureAndBuffer(reason: String) {
+        // Throttle screen captures to avoid performance hits
+        let now = Date()
+        if let lastCapture = lastScreenCaptureTime,
+           now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
+            // Skip this capture, too soon
+            return
+        }
+
+        lastScreenCaptureTime = now
+
+        Task { [weak self] in
+            guard let self = self else { return }
+            if let frame = await self.captureService.captureActiveScreen() {
+                await self.contextBuffer.updateLatestScreen(frame)
+                Logger.shared.log("Screen captured and buffered (\(reason))")
+            }
+        }
+    }
+
+    // MARK: - Consumer Flow (AI Pace)
+
+    /// Start the periodic annotation loop that consumes buffered data
+    private func startAnnotatorLoop() {
+        consumerTask = Task { [weak self] in
+            guard let self = self else { return }
+
+            while !Task.isCancelled {
+                // Wait for interval (e.g., 3 seconds)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+
+                // Check if buffer has data
+                guard await self.contextBuffer.hasData() else {
+                    continue
                 }
+
+                // Consume buffer
+                guard let batch = await self.contextBuffer.consumeAndClear() else {
+                    continue
+                }
+
+                Logger.shared.log("Consumer: Processing buffer batch (keystrokes: \(batch.keystrokes.count) chars)")
+
+                // Process with annotator
+                await self.processBufferBatch(batch)
+            }
+        }
+    }
+
+    /// Process a consumed buffer batch through the annotator
+    private func processBufferBatch(_ batch: BufferBatch) async {
+        let result = await self.annotator.annotate(batch: batch)
+        switch result {
+        case .failure(let error):
+            Logger.shared.log("Annotate failed (consumer): \(error)")
+        case .success(let context):
+            let taskId = self.stableTaskId(for: context)
+            if stateStore.wasDeclined(taskId) || stateStore.wasCompleted(taskId) { return }
+            self.pushToNebula(context: context, taskId: taskId)
+            let isNew = stateStore.updateCurrent(taskId: taskId)
+            if isNew {
+                Logger.shared.log("New task detected: \(context.taskLabel) [\(taskId)]")
+                overlay.showSuggestion(text: "Grok can help: \(context.taskLabel)")
+                overlay.showDecision(text: "Execute \(context.taskLabel)?")
             }
         }
     }
@@ -84,7 +164,22 @@ final class AppCoordinator {
         Logger.shared.log("Execute requested for task \(taskId)")
         Task { [weak self] in
             guard let self = self else { return }
-            let result = await self.annotator.annotate()
+
+            // Consume current buffer state for execution
+            let batch = await self.contextBuffer.consumeAndClear()
+
+            // If no batch exists, create one from fresh screen capture
+            let executionBatch: BufferBatch
+            if let batch = batch {
+                executionBatch = batch
+            } else if let frame = await self.captureService.captureActiveScreen() {
+                executionBatch = BufferBatch(keystrokes: "", screenFrame: frame, timestamp: Date())
+            } else {
+                Logger.shared.log("Execute failed: Unable to capture screen")
+                return
+            }
+
+            let result = await self.annotator.annotate(batch: executionBatch)
             switch result {
             case .failure(let error):
                 Logger.shared.log("Annotate before execute failed: \(error)")
