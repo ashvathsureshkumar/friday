@@ -51,7 +51,7 @@ final class AppCoordinator {
     private func maybeAnnotate(reason: String) {
         Task {
             let result = await annotator.annotate()
-            guard let self else { return }
+            guard let self = self else { return }
             switch result {
             case .failure(let error):
                 Logger.shared.log("Annotate failed (\(reason)): \(error)")
@@ -74,7 +74,7 @@ final class AppCoordinator {
         Logger.shared.log("Execute requested for task \(taskId)")
         Task {
             let result = await annotator.annotate()
-            guard let self else { return }
+            guard let self = self else { return }
             switch result {
             case .failure(let error):
                 Logger.shared.log("Annotate before execute failed: \(error)")
