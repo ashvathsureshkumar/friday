@@ -20,12 +20,6 @@ final class AppCoordinator {
     private let executor: ExecutorService
     private let nebula: NebulaClient
     private let grok: GrokClient
-    private var chatHistory: [GrokMessage] = []
-
-    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
-        let grokClient = GrokClient(apiKey: grokApiKey)
     private let executionAgent: ExecutionAgent
     private var chatHistory: [GrokMessage] = []
 
@@ -52,8 +46,6 @@ final class AppCoordinator {
         self.nebula = nebulaClient
         self.annotator = AnnotatorService(grok: grokClient, capture: captureService)
         self.executor = ExecutorService(grok: grokClient, nebula: nebulaClient)
-        self.annotator = AnnotatorService(grok: grok, capture: captureService)
-        self.executor = ExecutorService(grok: grok, nebula: nebulaClient)
         self.executionAgent = ExecutionAgent(stateStore: stateStore, overlay: overlay, executor: executor)
 
         overlay.onAccept = { [weak self] in self?.executeCurrentTask() }
