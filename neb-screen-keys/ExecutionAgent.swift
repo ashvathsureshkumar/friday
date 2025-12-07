@@ -62,7 +62,6 @@ final class ExecutionAgent {
 
             case .act(let reason):
                 Logger.shared.log(.executor, "ACT: \(reason)")
-                Logger.shared.log(.executor, "💡 Generated suggestion: '\(suggestion)'")
                 DispatchQueue.main.async { [weak self] in
                     self?.showOverlayAndGenerateSuggestion(for: annotation)
                 }
