@@ -82,12 +82,12 @@
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "NEBULA_API_KEY"
-            value = "neb_fClZ2pe4PFku_kvGhV1dWQ==.YotYfF6mWTxJ3yb_dQpgHGfsb0B64hUosmbdD4a2L70="
+            value = "neb_sUpRvhPCXmB_kkIW7wtldw==.6YS79ubXcv3pEKvd-Mg131PHyBLjfuQGJSNGicCCp1A="
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
             key = "NEBULA_COLLECTION_ID"
-            value = "aec926de-022c-47ac-8ae3-ddcd7febf68c"
+            value = "cd8e4a41-de13-46ac-8229-81c84b96dab3"
             isEnabled = "YES">
          </EnvironmentVariable>
       </EnvironmentVariables>

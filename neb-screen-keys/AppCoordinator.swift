@@ -97,20 +97,20 @@ final class AppCoordinator {
         if let lastCapture = lastScreenCaptureTime,
            now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
             // Skip this capture, too soon
-            Logger.shared.log(.capture, "⏭️ Capture skipped (throttled). Reason: \(reason)")
+            Logger.shared.log(.capture, "Capture skipped (throttled). Reason: \(reason)")
             return
         }
 
         lastScreenCaptureTime = now
-        Logger.shared.log(.capture, "🎬 Initiating screen capture. Reason: \(reason)")
+        Logger.shared.log(.capture, "Initiating screen capture. Reason: \(reason)")
 
         Task { [weak self] in
             guard let self = self else { return }
             if let frame = await self.captureService.captureActiveScreen() {
                 await self.contextBuffer.updateLatestScreen(frame)
-                Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
+                Logger.shared.log(.capture, "Screen captured and buffered (\(reason))")
             } else {
-                Logger.shared.log(.capture, "❌ Screen capture failed (\(reason))")
+                Logger.shared.log(.capture, "Screen capture failed (\(reason))")
             }
         }
     }
@@ -119,7 +119,7 @@ final class AppCoordinator {
 
     /// Start the periodic annotation loop that consumes buffered data
     private func startAnnotatorLoop() {
-        Logger.shared.log(.flow, "🔄 Consumer loop starting (3s interval)...")
+        Logger.shared.log(.flow, "Consumer loop starting (3s interval)...")
 
         consumerTask = Task { [weak self] in
             guard let self = self else { return }
@@ -128,60 +128,71 @@ final class AppCoordinator {
                 // Wait for interval (e.g., 3 seconds)
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
 
-                Logger.shared.log(.flow, "🔔 Loop tick. Checking buffer...")
+                Logger.shared.log(.flow, "Loop tick. Checking buffer...")
 
                 // Check if buffer has data
                 let hasData = await self.contextBuffer.hasData()
                 guard hasData else {
-                    Logger.shared.log(.flow, "💤 Buffer empty, skipping annotation")
+                    Logger.shared.log(.flow, "Buffer empty, skipping annotation")
                     continue
                 }
 
                 // Consume buffer
                 guard let batch = await self.contextBuffer.consumeAndClear() else {
-                    Logger.shared.log(.flow, "⚠️ Buffer had data but consumeAndClear returned nil")
+                    Logger.shared.log(.flow, "Buffer had data but consumeAndClear returned nil")
                     continue
                 }
 
-                Logger.shared.log(.flow, "📋 Processing batch: \(batch.keystrokes.count) chars, screen=\(batch.screenFrame != nil)")
+                Logger.shared.log(.flow, "Processing batch: \(batch.keystrokes.count) chars, screen=\(batch.screenFrame != nil)")
 
                 // Process with annotator
                 await self.processBufferBatch(batch)
             }
 
-            Logger.shared.log(.flow, "🛑 Consumer loop stopped")
+            Logger.shared.log(.flow, "Consumer loop stopped")
         }
     }
 
     /// Process a consumed buffer batch through the annotator
     private func processBufferBatch(_ batch: BufferBatch) async {
-        Logger.shared.log(.flow, "➡️ Sending batch to annotator...")
+        Logger.shared.log(.flow, "Sending batch to annotator...")
 
         let result = await self.annotator.annotate(batch: batch)
         switch result {
         case .failure(let error):
-            Logger.shared.log(.flow, "❌ Annotation failed: \(error.localizedDescription)")
+            Logger.shared.log(.flow, "Annotation failed: \(error.localizedDescription)")
         case .success(let context):
             let taskId = self.stableTaskId(for: context)
 
             if stateStore.wasDeclined(taskId) {
-                Logger.shared.log(.flow, "⏭️ Task was declined previously, skipping. ID: \(taskId.prefix(8))...")
+                Logger.shared.log(.flow, "Task was declined previously, skipping. ID: \(taskId.prefix(8))...")
                 return
             }
             if stateStore.wasCompleted(taskId) {
-                Logger.shared.log(.flow, "⏭️ Task was completed previously, skipping. ID: \(taskId.prefix(8))...")
+                Logger.shared.log(.flow, "Task was completed previously, skipping. ID: \(taskId.prefix(8))...")
                 return
             }
 
-            self.pushToNebula(context: context, taskId: taskId)
+            // Store comprehensive context including keystrokes to Nebula
+            self.pushToNebula(context: context, taskId: taskId, keystrokes: batch.keystrokes, timestamp: batch.timestamp)
 
             let isNew = stateStore.updateCurrent(taskId: taskId)
             if isNew {
-                Logger.shared.log(.flow, "🆕 New task detected: '\(context.taskLabel)' [ID: \(taskId.prefix(8))...]")
-                overlay.showSuggestion(text: "Grok can help: \(context.taskLabel)")
-                overlay.showDecision(text: "Execute \(context.taskLabel)?")
+                Logger.shared.log(.flow, "New task detected: '\(context.taskLabel)' [ID: \(taskId.prefix(8))...]")
+                
+                // Show decision panel with task label
+                let decisionText = "Execute automation for:\n\(context.taskLabel)"
+                overlay.showDecision(text: decisionText)
+                
+                // Generate and show AI suggestion preview asynchronously
+                overlay.showSuggestion(text: "Thinking...")
+                executor.generateSuggestionPreview(task: context) { [weak self] suggestion in
+                    DispatchQueue.main.async {
+                        self?.overlay.showSuggestion(text: suggestion)
+                    }
+                }
             } else {
-                Logger.shared.log(.flow, "♻️ Task already known, overlay remains visible")
+                Logger.shared.log(.flow, "Task already known, overlay remains visible")
             }
         }
     }
@@ -211,7 +222,8 @@ final class AppCoordinator {
             case .failure(let error):
                 Logger.shared.log("Annotate before execute failed: \(error)")
             case .success(let context):
-                self.executor.planAndExecute(task: context) { execResult in
+                // Pass batch context for comprehensive execution
+                self.executor.planAndExecute(task: context, keystrokes: executionBatch.keystrokes) { execResult in
                     switch execResult {
                     case .failure(let error):
                         Logger.shared.log("Plan/execute failed: \(error)")
@@ -232,19 +244,57 @@ final class AppCoordinator {
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
-    private func pushToNebula(context: AnnotatedContext, taskId: String) {
+    private func pushToNebula(context: AnnotatedContext, taskId: String, keystrokes: String, timestamp: Date) {
+        // Build comprehensive content with ALL curated information
+        var contentParts: [String] = []
+        
+        // Task identification
+        contentParts.append("Task: \(context.taskLabel)")
+        contentParts.append("App: \(context.app)")
+        contentParts.append("Window: \(context.windowTitle)")
+        
+        // AI Analysis
+        contentParts.append("\nAnalysis Summary: \(context.summary)")
+        contentParts.append("Confidence: \(String(format: "%.2f", context.confidence))")
+        
+        // User Activity Context
+        if !keystrokes.isEmpty {
+            let keystrokeCount = keystrokes.count
+            let hasShortcuts = keystrokes.contains("[SHORTCUT:")
+            let shortcuts = keystrokes.components(separatedBy: "[SHORTCUT:").dropFirst()
+                .compactMap { $0.components(separatedBy: "]").first }
+            
+            contentParts.append("\nUser Activity:")
+            contentParts.append("- Keystroke intensity: \(keystrokeCount) characters")
+            if hasShortcuts {
+                contentParts.append("- Shortcuts used: \(shortcuts.joined(separator: ", "))")
+            }
+            contentParts.append("- Activity pattern: \(keystrokes)")
+        }
+        
+        let fullContent = contentParts.joined(separator: "\n")
+        
+        // Comprehensive metadata for semantic search
         let metadata: [String: Any] = [
             "task_id": taskId,
             "task_label": context.taskLabel,
             "app": context.app,
             "window_title": context.windowTitle,
             "confidence": context.confidence,
-            "timestamp": context.timestamp.timeIntervalSince1970
+            "timestamp": context.timestamp.timeIntervalSince1970,
+            "buffer_timestamp": timestamp.timeIntervalSince1970,
+            "keystroke_count": keystrokes.count,
+            "has_shortcuts": keystrokes.contains("[SHORTCUT:"),
+            "type": "task_detection"
         ]
-        let content = "Summary: \(context.summary)"
-        nebula.addMemory(content: content, metadata: metadata) { result in
+        
+        Logger.shared.log(.nebula, "Storing comprehensive context to Nebula: \(fullContent.count) chars")
+        
+        nebula.addMemory(content: fullContent, metadata: metadata) { result in
             if case .failure(let error) = result {
-                print("Nebula addMemory error: \(error.localizedDescription)")
+                Logger.shared.log(.nebula, "Nebula addMemory error: \(error.localizedDescription)")
+            } else {
+                Logger.shared.log(.nebula, "Context stored successfully for task \(taskId.prefix(8))...")
             }
         }
     }

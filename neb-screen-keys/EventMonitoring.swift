@@ -66,7 +66,7 @@ final class KeystrokeMonitor {
                 Logger.shared.log(.event, "KeystrokeMonitor active. CGEventTap enabled.")
             }
         } else {
-            Logger.shared.log(.event, "⚠️ KeystrokeMonitor failed to create event tap (check Accessibility permissions)")
+            Logger.shared.log(.event, "KeystrokeMonitor failed to create event tap (check Accessibility permissions)")
         }
     }
 

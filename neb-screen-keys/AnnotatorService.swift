@@ -5,6 +5,23 @@
 
 import Cocoa
 
+// MARK: - Chat Completion Response Structures
+
+struct ChatCompletionResponse: Codable {
+    let choices: [Choice]
+
+    struct Choice: Codable {
+        let message: Message
+    }
+
+    struct Message: Codable {
+        let role: String
+        let content: String?
+    }
+}
+
+// MARK: - Annotator Service
+
 final class AnnotatorService {
     private let grok: GrokClient
     private let capture: ScreenCaptureService
@@ -16,11 +33,11 @@ final class AnnotatorService {
 
     /// Annotate using a BufferBatch (keystrokes + screen frame)
     func annotate(batch: BufferBatch) async -> Result<AnnotatedContext, Error> {
-        Logger.shared.log(.annotator, "📥 Annotation request started (keystrokes: \(batch.keystrokes.count) chars)")
+        Logger.shared.log(.annotator, "Annotation request started (keystrokes: \(batch.keystrokes.count) chars)")
 
         guard let frame = batch.screenFrame else {
             let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "No screen frame in batch"])
-            Logger.shared.log(.annotator, "❌ Annotation failed: No screen frame in batch")
+            Logger.shared.log(.annotator, "Annotation failed: No screen frame in batch")
             return .failure(err)
         }
 
@@ -28,52 +45,77 @@ final class AnnotatorService {
               let bitmap = NSBitmapImageRep(data: imageData),
               let pngData = bitmap.representation(using: .png, properties: [:]) else {
             let err = NSError(domain: "annotator", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unable to encode screen image"])
-            Logger.shared.log(.annotator, "❌ Annotation failed: Unable to encode screen image")
+            Logger.shared.log(.annotator, "Annotation failed: Unable to encode screen image")
             return .failure(err)
         }
 
         Logger.shared.log(.annotator, "Sending request to Grok (image: \(pngData.count / 1024)KB)...")
 
         let b64 = pngData.base64EncodedString()
-        let attachment = GrokAttachment(type: "input_image", image_url: "data:image/png;base64,\(b64)")
+        let imageDataUrl = "data:image/png;base64,\(b64)"
 
         // Build prompt with keystroke context
         let prompt = buildPromptWithKeystrokes(frame: frame, keystrokes: batch.keystrokes)
 
-        let request = GrokRequest(
-            model: "grok-2-latest",
+        // Build OpenAI-compatible chat request with vision
+        let request = ChatRequest(
             messages: [
-                GrokMessage(role: "user", content: [
-                    GrokMessagePart(type: "text", text: prompt)
+                ChatMessage(role: "user", content: [
+                    .text(prompt),
+                    .imageUrl(ImageUrl(url: imageDataUrl))
                 ])
             ],
-            attachments: [attachment],
-            stream: false
+            model: "grok-2-vision-1212",  // Vision-capable model
+            stream: false,
+            temperature: 0.7
         )
 
         let result = await withCheckedContinuation { (cont: CheckedContinuation<Result<AnnotatedContext, Error>, Never>) in
             grok.createResponse(request) { res in
                 switch res {
                 case .failure(let error):
-                    Logger.shared.log(.annotator, "❌ Grok API error: \(error.localizedDescription)")
+                    Logger.shared.log(.annotator, "Grok API error: \(error.localizedDescription)")
                     cont.resume(returning: .failure(error))
                 case .success(let data):
-                    guard let text = String(data: data, encoding: .utf8) else {
-                        Logger.shared.log(.annotator, "❌ Grok response decode failed")
-                        cont.resume(returning: .failure(NSError(domain: "annotator", code: -2, userInfo: [NSLocalizedDescriptionKey: "Bad Grok response"])))
-                        return
+                    // Log raw response
+                    if let responseText = String(data: data, encoding: .utf8) {
+                        let truncated = responseText.count > 500 ? String(responseText.prefix(500)) + "..." : responseText
+                        Logger.shared.log(.annotator, "Grok raw response (\(responseText.count) chars): \(truncated)")
                     }
 
-                    // Log raw response (truncated)
-                    let truncated = text.count > 500 ? String(text.prefix(500)) + "..." : text
-                    Logger.shared.log(.annotator, "📨 Grok response (\(text.count) chars): \(truncated)")
+                    // Parse Chat Completions response
+                    do {
+                        let chatResponse = try JSONDecoder().decode(ChatCompletionResponse.self, from: data)
 
-                    let parsed = AnnotatorService.parseAnnotated(jsonText: text,
-                                                                 fallbackApp: frame.appName,
-                                                                 fallbackWindow: frame.windowTitle)
+                        guard let firstChoice = chatResponse.choices.first,
+                              let messageContent = firstChoice.message.content else {
+                            let error = NSError(domain: "annotator", code: -3,
+                                              userInfo: [NSLocalizedDescriptionKey: "No content in Grok response"])
+                            Logger.shared.log(.annotator, "No content in response")
+                            cont.resume(returning: .failure(error))
+                            return
+                        }
 
-                    Logger.shared.log(.annotator, "✅ Parsed result: Task='\(parsed.taskLabel)', Confidence=\(parsed.confidence), App=\(parsed.app)")
-                    cont.resume(returning: .success(parsed))
+                        Logger.shared.log(.annotator, "Extracted content (\(messageContent.count) chars)")
+
+                        // Parse the JSON content from Grok's message
+                        guard let parsed = AnnotatorService.parseAnnotated(jsonText: messageContent,
+                                                                          fallbackApp: frame.appName,
+                                                                          fallbackWindow: frame.windowTitle) else {
+                            let error = NSError(domain: "annotator", code: -4,
+                                              userInfo: [NSLocalizedDescriptionKey: "Failed to parse AnnotatedContext from Grok content"])
+                            Logger.shared.log(.annotator, "Failed to parse AnnotatedContext from content")
+                            cont.resume(returning: .failure(error))
+                            return
+                        }
+
+                        Logger.shared.log(.annotator, "Parsed result: Task='\(parsed.taskLabel)', Confidence=\(parsed.confidence), App=\(parsed.app)")
+                        cont.resume(returning: .success(parsed))
+
+                    } catch {
+                        Logger.shared.log(.annotator, "JSON decode error: \(error.localizedDescription)")
+                        cont.resume(returning: .failure(error))
+                    }
                 }
             }
         }
@@ -136,7 +178,7 @@ final class AnnotatorService {
         - Window: "server_logs — zsh"
         - Image Content: Shows a terminal wall of text with "CRITICAL ERROR: Connection Refused on Port 5432" in red.
 
-        **✅ GOOD RESPONSE:**
+        **GOOD RESPONSE:**
         {
         "task_label": "Debugging Infrastructure",
         "confidence": 0.95,
@@ -145,7 +187,7 @@ final class AnnotatorService {
         "window_title": "server_logs — zsh"
         }
 
-        **❌ BAD RESPONSE (Vague):**
+        **BAD RESPONSE (Vague):**
         {
         "task_label": "Terminal",
         "confidence": 0.5,
@@ -160,7 +202,7 @@ final class AnnotatorService {
         - Window: "Compose: Pitch Deck - Gmail"
         - Image Content: User is typing "Attached are the financials we discussed..."
 
-        **✅ GOOD RESPONSE:**
+        **GOOD RESPONSE:**
         {
         "task_label": "Drafting Email",
         "confidence": 0.9,
@@ -175,7 +217,7 @@ final class AnnotatorService {
         - Window: "Hacker News"
         - Image Content: User is scrolling through news headlines.
 
-        **✅ GOOD RESPONSE:**
+        **GOOD RESPONSE:**
         {
         "task_label": "Passive Browsing",
         "confidence": 0.8,
@@ -186,29 +228,38 @@ final class AnnotatorService {
         """
     }
 
-    private static func parseAnnotated(jsonText: String, fallbackApp: String, fallbackWindow: String) -> AnnotatedContext {
+    /// Parse AnnotatedContext from Grok's JSON response
+    /// - Returns: AnnotatedContext if parsing succeeds, nil otherwise (NO FAKE SUCCESS)
+    private static func parseAnnotated(jsonText: String, fallbackApp: String, fallbackWindow: String) -> AnnotatedContext? {
         let cleaned = jsonText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let jsonStart = cleaned.firstIndex(of: "{"),
-           let data = String(cleaned[jsonStart...]).data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] {
-            let taskLabel = (obj["task_label"] as? String) ?? "\(fallbackApp) task"
-            let confidence = (obj["confidence"] as? Double) ?? 0.5
-            let summary = (obj["summary"] as? String) ?? cleaned
-            let app = (obj["app"] as? String) ?? fallbackApp
-            let window = (obj["window_title"] as? String) ?? fallbackWindow
-            return AnnotatedContext(taskLabel: taskLabel,
-                                    confidence: confidence,
-                                    summary: summary,
-                                    app: app,
-                                    windowTitle: window,
-                                    timestamp: Date())
+
+        // Find JSON object in response
+        guard let jsonStart = cleaned.firstIndex(of: "{"),
+              let data = String(cleaned[jsonStart...]).data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            Logger.shared.log(.annotator, "Failed to extract JSON object from response")
+            return nil
         }
-        return AnnotatedContext(taskLabel: "\(fallbackApp) task",
-                                confidence: 0.5,
-                                summary: cleaned,
-                                app: fallbackApp,
-                                windowTitle: fallbackWindow,
-                                timestamp: Date())
+
+        // Require essential fields
+        guard let taskLabel = obj["task_label"] as? String,
+              let confidence = obj["confidence"] as? Double,
+              let summary = obj["summary"] as? String else {
+            Logger.shared.log(.annotator, "Missing required fields (task_label, confidence, or summary)")
+            return nil
+        }
+
+        let app = (obj["app"] as? String) ?? fallbackApp
+        let window = (obj["window_title"] as? String) ?? fallbackWindow
+
+        return AnnotatedContext(
+            taskLabel: taskLabel,
+            confidence: confidence,
+            summary: summary,
+            app: app,
+            windowTitle: window,
+            timestamp: Date()
+        )
     }
 }
 

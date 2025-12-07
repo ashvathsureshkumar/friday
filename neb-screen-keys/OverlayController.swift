@@ -41,7 +41,7 @@ final class OverlayController {
 
     private func makePanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 200, y: 200, width: 260, height: 56),
+            contentRect: NSRect(x: 200, y: 200, width: 320, height: 80),
             styleMask: [.nonactivatingPanel, .hudWindow],
             backing: .buffered,
             defer: false
@@ -50,31 +50,46 @@ final class OverlayController {
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
-        let label = NSTextField(labelWithString: "Grok can help with this task")
-        label.frame = NSRect(x: 12, y: 16, width: 216, height: 24)
+        
+        // Multi-line wrapping label to show suggestions
+        let label = NSTextField(wrappingLabelWithString: "Grok can help with this task")
+        label.frame = NSRect(x: 12, y: 12, width: 296, height: 56)
+        label.font = NSFont.systemFont(ofSize: 11)
+        label.textColor = NSColor.labelColor
+        label.maximumNumberOfLines = 3
+        label.lineBreakMode = .byWordWrapping
         panel.contentView?.addSubview(label)
         return panel
     }
 
     private func makeDecisionPanel() -> NSPanel {
         let panel = NSPanel(
-            contentRect: NSRect(x: 20, y: NSScreen.main?.frame.height ?? 800 - 80, width: 260, height: 90),
+            contentRect: NSRect(x: 20, y: NSScreen.main?.frame.height ?? 800 - 80, width: 300, height: 110),
             styleMask: [.nonactivatingPanel, .hudWindow],
             backing: .buffered,
             defer: false
         )
         panel.isFloatingPanel = true
         panel.level = .statusBar
-        let label = NSTextField(labelWithString: "Execute this task?")
-        label.frame = NSRect(x: 12, y: 50, width: 236, height: 24)
+        
+        // Multi-line wrapping label for task description
+        let label = NSTextField(wrappingLabelWithString: "Execute this task?")
+        label.frame = NSRect(x: 12, y: 60, width: 276, height: 38)
+        label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        label.textColor = NSColor.labelColor
+        label.maximumNumberOfLines = 2
+        label.lineBreakMode = .byWordWrapping
+        label.alignment = .center
         panel.contentView?.addSubview(label)
 
-        let yes = NSButton(title: "Yes", target: self, action: #selector(handleYes))
-        yes.frame = NSRect(x: 20, y: 14, width: 80, height: 28)
+        let yes = NSButton(title: "Yes, Execute", target: self, action: #selector(handleYes))
+        yes.frame = NSRect(x: 20, y: 18, width: 120, height: 32)
+        yes.bezelStyle = .rounded
         panel.contentView?.addSubview(yes)
 
-        let no = NSButton(title: "No", target: self, action: #selector(handleNo))
-        no.frame = NSRect(x: 160, y: 14, width: 80, height: 28)
+        let no = NSButton(title: "Not Now", target: self, action: #selector(handleNo))
+        no.frame = NSRect(x: 160, y: 18, width: 120, height: 32)
+        no.bezelStyle = .rounded
         panel.contentView?.addSubview(no)
         return panel
     }

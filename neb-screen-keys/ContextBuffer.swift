@@ -63,7 +63,7 @@ actor ContextBufferService {
         // Clear keystroke buffer but keep screen frame as baseline
         keystrokeBuffer = ""
 
-        Logger.shared.log(.buffer, "📤 Batch consumed: \(keystrokeCount) chars + \(hasScreen ? "ScreenFrame ✓" : "No screen ✗"). Buffer cleared.")
+        Logger.shared.log(.buffer, "Batch consumed: \(keystrokeCount) chars + \(hasScreen ? "ScreenFrame" : "No screen"). Buffer cleared.")
 
         return batch
     }

@@ -15,6 +15,14 @@ The project is configured to build to a **fixed location** to avoid macOS permis
 
 This is set via `CONFIGURATION_BUILD_DIR = "$(SRCROOT)/build/$(CONFIGURATION)"` in project.pbxproj.
 
+### Code Signing
+**Debug builds have code signing DISABLED** (`CODE_SIGN_IDENTITY = "-"`) to prevent macOS from re-requesting permissions on every rebuild. This is critical because:
+- Each rebuild with automatic signing generates a new code signature
+- macOS tracks permissions by bundle ID + code signature
+- Without consistent signing, permissions are lost on every rebuild
+
+**Release builds can use automatic signing** for distribution.
+
 ### App Sandbox
 **App Sandbox is DISABLED** (`ENABLE_APP_SANDBOX = NO`) because the app requires:
 - Unrestricted network access (Grok and Nebula APIs)

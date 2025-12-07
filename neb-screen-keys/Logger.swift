@@ -15,19 +15,6 @@ enum LogCategory: String {
     case flow = "Flow"
     case capture = "Capture"
     case system = "System"
-
-    var emoji: String {
-        switch self {
-        case .event: return "⌨️"
-        case .buffer: return "📦"
-        case .annotator: return "🧠"
-        case .executor: return "⚡"
-        case .nebula: return "☁️"
-        case .flow: return "🔄"
-        case .capture: return "📸"
-        case .system: return "⚙️"
-        }
-    }
 }
 
 final class Logger {
@@ -46,7 +33,7 @@ final class Logger {
     ///   - message: The message to log
     func log(_ category: LogCategory, _ message: String) {
         let timestamp = dateFormatter.string(from: Date())
-        print("[\(timestamp)] [\(category.rawValue)] \(category.emoji) \(message)")
+        print("[\(timestamp)] [\(category.rawValue)] \(message)")
     }
 
     /// Log a message without category (legacy support)
