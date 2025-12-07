@@ -80,6 +80,8 @@ final class ExecutorService {
             guard let self else { return }
             
             let memoriesText: String
+            var memoryIdsToDelete: [String] = []  // Track IDs for cleanup
+            
             switch searchResult {
             case .failure(let error):
                 Logger.shared.log(.executor, "Nebula search failed: \(error.localizedDescription)")
@@ -88,6 +90,21 @@ final class ExecutorService {
                 if let retrieved = String(data: data, encoding: .utf8), !retrieved.isEmpty {
                     Logger.shared.log(.executor, "Retrieved memories: \(retrieved.count) chars")
                     memoriesText = retrieved
+                    
+                    // Extract memory IDs for deletion after execution
+                    do {
+                        let searchResponse = try JSONDecoder().decode(NebulaSearchResponse.self, from: data)
+                        if let results = searchResponse.results {
+                            for result in results {
+                                if let memId = result.memory_id ?? result.id {
+                                    memoryIdsToDelete.append(memId)
+                                }
+                            }
+                            Logger.shared.log(.executor, "Tracked \(memoryIdsToDelete.count) memory IDs for cleanup")
+                        }
+                    } catch {
+                        Logger.shared.log(.executor, "Failed to parse search response for IDs: \(error)")
+                    }
                 } else {
                     memoriesText = "No prior memories available."
                 }
@@ -127,6 +144,10 @@ final class ExecutorService {
                         Logger.shared.log(.executor, "Grok response received: \(content.count) chars")
                         Logger.shared.log(.executor, "Plan generated (\(content.count) chars)")
                         self.executeAppleScriptIfPresent(planText: content)
+                        
+                        // Cleanup: Delete used memories to prevent infinite growth
+                        self.deleteUsedMemories(memoryIdsToDelete)
+                        
                         completion(.success(content))
                     } catch {
                         Logger.shared.log(.executor, "Failed to decode executor response: \(error.localizedDescription)")
@@ -345,6 +366,28 @@ final class ExecutorService {
         return promptParts.joined(separator: "\n")
     }
 
+    /// Delete used memories to prevent collection from growing infinitely
+    private func deleteUsedMemories(_ memoryIds: [String]) {
+        guard !memoryIds.isEmpty else {
+            Logger.shared.log(.executor, "No memories to delete")
+            return
+        }
+        
+        Logger.shared.log(.executor, "Cleaning up \(memoryIds.count) used memories...")
+        
+        // Delete each memory asynchronously
+        for memId in memoryIds {
+            nebula.deleteMemory(memoryId: memId) { result in
+                switch result {
+                case .success:
+                    Logger.shared.log(.executor, "✓ Deleted memory: \(memId)")
+                case .failure(let error):
+                    Logger.shared.log(.executor, "⚠️ Failed to delete memory \(memId): \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+    
     private func executeAppleScriptIfPresent(planText: String) {
         Logger.shared.log(.executor, "Searching for AppleScript in response...")
         

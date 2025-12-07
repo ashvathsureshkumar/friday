@@ -129,16 +129,26 @@ The app uses a **multi-layered Producer-Consumer** architecture with `AppCoordin
 Four main services handle distinct responsibilities:
 
 1. **ScreenCaptureService** (ScreenCaptureService.swift:10): 
-   - Captures fresh screen images using ScreenCaptureKit (macOS 14+)
-   - Returns `ScreenFrame` with image + app metadata
+   - Captures **entire main display** using ScreenCaptureKit (macOS 14+)
+   - **Full Context Strategy**: Shows all visible windows and their relationships
+   - **Cursor Focus Visualization**: Draws red circle (40px radius, 4px stroke) at cursor position
+   - **Infinity Mirror Prevention**: Excludes own app from capture using bundle identifier
+   - Returns `ScreenFrame` with full desktop image + frontmost app metadata
    - Uses `OneShotFrameGrabber` that captures a single frame per request (no caching)
-   - Each capture is fresh and represents current screen state
+   - Each capture is fresh and represents complete screen state
+   - Optional resolution scaling available (commented) to save tokens/bandwidth
+   - Simple single-path logic: always captures main display
 
 2. **AnnotatorService** (AnnotatorService.swift:25): 
-   - Sends screen captures to Grok AI with base64-encoded PNG images
+   - Sends **full desktop captures** to Grok AI with cursor focus indicator
+   - Base64-encoded PNG images showing complete workspace
    - Uses `grok-2-vision-1212` model for vision + language understanding
+   - **Full Context Prompts**: Instructs AI to analyze entire screen and window relationships
+   - **Multi-Window Understanding**: Detects patterns like "code editor + documentation browser"
+   - **Cursor Priority**: Red circle indicates primary focus area within full context
    - Receives structured JSON with task analysis (task_label, confidence, summary, app, window_title)
    - Parses response into `AnnotatedContext` with fallback handling
+   - Few-shot examples demonstrate multi-window context analysis
 
 3. **ExecutorService** (ExecutorService.swift:8): 
    - Generates quick suggestion previews for the cursor overlay using `grok-4-fast`
@@ -329,18 +339,32 @@ The app uses a **three-phase architecture** with clear separation of concerns:
 - All buffer operations use Swift actors for thread-safe concurrent access
 
 ### Screen Capture Specifics
-- Uses `OneShotFrameGrabber` (ScreenCaptureService.swift:53) that implements `SCStreamOutput`
+- Uses `OneShotFrameGrabber` (ScreenCaptureService.swift:~115) that implements `SCStreamOutput`
+- **Full Context Capture**: Always captures entire main display with all visible windows
+- **Simple Strategy**: Single code path with no fallbacks or window hunting
+- **Cursor Focus Visualization**: Draws red circle at cursor position to guide AI attention
+  - Circle specs: 40px radius, 4px stroke, red color (1.0, 0.0, 0.0, 0.9 alpha)
+  - Helps AI understand which window/area user is actively using
+  - Coordinate conversion: Global screen → Display-relative → Image coords
+  - Graceful fallback: Uses original image if cursor position unavailable
+- **Infinity Mirror Prevention**: Excludes own app using `Bundle.main.bundleIdentifier`
 - **No caching**: Each capture creates a new grabber instance for fresh frames
 - `firstFrame()` uses checked continuation that resolves when first frame arrives
-- Captures entire display at native resolution with BGRA pixel format
-- Gets frontmost app name and window title via NSWorkspace
+- Captures at native display resolution with BGRA pixel format
+- Gets frontmost app name and window title via NSWorkspace for metadata
+- Logs capture resolution and cursor coordinates for debugging
+- **Optional scaling**: Commented code available to scale down large displays (save tokens)
 
 ### Grok AI Integration
 - **Annotator Model**: `grok-2-vision-1212` - Vision + language for understanding screen content
+  - Receives full desktop screenshots with cursor focus indicator (red circle)
+  - Prompt includes cursor-aware instructions: prioritize content near circle
+  - Implements "general relativity" principle: cursor warps attention space
+  - Few-shot examples demonstrate cursor-focused analysis
 - **Executor Model**: `grok-4-fast` - Fast text model for suggestions and execution planning
 - Uses OpenAI-compatible Chat Completions API format
 - Image attachments via base64 data URLs: `data:image/png;base64,...`
-- Structured prompts with few-shot examples for consistent JSON output
+- Structured prompts with cursor context and few-shot examples for consistent JSON output
 - **Actionable automation prompts** with 5 detailed examples of interactive AppleScript patterns
 
 ### AppleScript Execution Capabilities
@@ -524,7 +548,22 @@ If you see these warnings, grant the permissions in System Settings manually.
 
 ### December 2024 Updates
 
-#### 1. Fan-Out Architecture with Annotation Buffer (Latest)
+#### 1. Full Context Capture Strategy (Latest)
+- **Simplified Architecture**: Removed ~200 lines of complex window detection code
+- **Main Display Capture**: Always captures entire main display with all windows
+- **Window Relationships**: AI can now understand multi-window task contexts
+- **Cursor Focus Indicator**: Red circle shows primary attention area within full context
+- **Infinity Mirror Prevention**: Excludes own app from capture using bundle ID
+- **No Fallbacks Needed**: Single reliable code path
+- **Benefits**:
+  - Simpler code (easier to maintain)
+  - Full workspace context for AI
+  - Window relationship understanding (code + docs, error + search)
+  - No edge cases with window detection
+  - Consistent performance
+  - Better multi-tasking detection
+
+#### 2. Cursor Focus Visualization & Full Desktop Capture
 - **Decoupled Consumers**: Introduced `AnnotationBufferService` actor for multicast streaming
 - **Parallel Processing**: Nebula storage and Execution Agent now run concurrently
 - **Non-Blocking Annotator**: AI loop never waits for network calls or UI updates

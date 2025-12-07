@@ -28,8 +28,8 @@ final class AppCoordinator {
     private var executionConsumerTask: Task<Void, Never>?
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_nMIP7L236JkymXVVPRJcBA==.aejAQwwCDTPxOduAWnyoE5AzSCHTog9bSJP9OudzHb0=",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "cd8e4a41-de13-46ac-8229-81c84b96dab3"){
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=",
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "aec926de-022c-47ac-8ae3-ddcd7febf68c"){
         
         // Log environment variable status for debugging
         Logger.shared.log(.system, "AppCoordinator initialization:")
@@ -137,14 +137,14 @@ final class AppCoordinator {
 
     /// Start the periodic annotation loop that consumes buffered data
     private func startAnnotatorLoop() {
-        Logger.shared.log(.flow, "Consumer loop starting (3s interval)...")
+        Logger.shared.log(.flow, "Consumer loop starting (2s interval)...")
 
         consumerTask = Task { [weak self] in
             guard let self = self else { return }
 
             while !Task.isCancelled {
-                // Wait for interval (e.g., 3 seconds)
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                // Wait for interval (2 seconds for frequent active window capture)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
 
                 Logger.shared.log(.flow, "Loop tick. Checking buffer...")
 

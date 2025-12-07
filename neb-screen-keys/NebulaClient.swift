@@ -46,6 +46,27 @@ struct NebulaMemoryResponse: Codable {
     }
 }
 
+/// Response structure for memory search results
+struct NebulaSearchResponse: Codable {
+    let results: [NebulaSearchResult]?
+    
+    struct NebulaSearchResult: Codable {
+        let id: String?
+        let memory_id: String?
+        let content: String?
+        let metadata: [String: String]?
+        let score: Double?
+        
+        enum CodingKeys: String, CodingKey {
+            case id
+            case memory_id
+            case content
+            case metadata
+            case score
+        }
+    }
+}
+
 // MARK: - Nebula Client
 
 final class NebulaClient {
@@ -153,6 +174,48 @@ final class NebulaClient {
                 completion(.failure(error))
             }
         }
+    }
+    
+    func deleteMemory(memoryId: String, completion: @escaping (Result<Void, Error>) -> Void) {
+        Logger.shared.log(.nebula, "Deleting memory: \(memoryId)")
+        
+        let deleteURL = baseURL.appendingPathComponent("v1/memories/\(memoryId)")
+        var urlRequest = URLRequest(url: deleteURL)
+        urlRequest.httpMethod = "DELETE"
+        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        
+        Logger.shared.log(.nebula, "DELETE \(deleteURL.absoluteString)")
+        
+        session.dataTask(with: urlRequest) { data, response, error in
+            if let error = error {
+                Logger.shared.log(.nebula, "Delete failed: \(error.localizedDescription)")
+                completion(.failure(error))
+                return
+            }
+            
+            if let httpResponse = response as? HTTPURLResponse {
+                Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
+                
+                // Accept 200-299 and 404 (already deleted) as success
+                if (200...299).contains(httpResponse.statusCode) || httpResponse.statusCode == 404 {
+                    Logger.shared.log(.nebula, "✅ Memory deleted successfully: \(memoryId)")
+                    completion(.success(()))
+                } else {
+                    if let data = data, let errorBody = String(data: data, encoding: .utf8) {
+                        Logger.shared.log(.nebula, "Delete error (\(httpResponse.statusCode)): \(errorBody)")
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: errorBody])
+                        completion(.failure(error))
+                    } else {
+                        let error = NSError(domain: "nebula",
+                                          code: httpResponse.statusCode,
+                                          userInfo: [NSLocalizedDescriptionKey: "Delete failed with status \(httpResponse.statusCode)"])
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }.resume()
     }
 
     // POST to store_memory endpoint using proper Codable struct
