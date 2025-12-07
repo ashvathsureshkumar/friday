@@ -170,9 +170,23 @@ final class AnnotatorService {
         "task_label": "String. Short, specific intent (e.g., 'Debugging Python Error', 'Drafting Email to Investor', 'Reading API Documentation').",
         "confidence": 0.0 to 1.0 (Float). 1.0 = window content is perfectly clear. 0.5 = ambiguous or loading screen.",
         "summary": "String. A detailed sentence describing what the user is doing based on window content. Include specific entities, errors, or actions visible.",
+        "activity_type": "String. One of: 'blocked', 'help_seeking', 'tedious', 'passive', 'meeting', 'productive'. You MUST pick one - see definitions below.",
+        "popup_style": "String. One of: 'cursor', 'notification'. See definitions below.",
         "app": "String. The confirmed application name.",
         "window_title": "String. The confirmed window title."
         }
+
+        **ACTIVITY TYPE DEFINITIONS (you MUST choose exactly one - no "ambiguous" or "unknown"):**
+        - **blocked**: User is STUCK. Errors visible, build failures, connection refused, exceptions, crash logs, red error text.
+        - **help_seeking**: User is SEARCHING for solutions. Stack Overflow, googling error messages, reading GitHub issues, "how to fix" searches.
+        - **tedious**: User doing REPETITIVE work that automation could speed up. Formatting code, copy-pasting between apps, running same commands.
+        - **passive**: User is READING or CONSUMING content. Documentation, articles, watching videos, casual browsing, social media. Also use for loading screens or unclear contexts.
+        - **meeting**: User is in a VIDEO CALL or screen sharing. Zoom, Teams, Meet, FaceTime visible.
+        - **productive**: User is IN FLOW. Actively typing code, writing content, making progress. Do NOT interrupt.
+
+        **POPUP STYLE DEFINITIONS:**
+        - **cursor**: Use when the action is CONTEXTUAL to cursor position. Examples: type a command in terminal at cursor, click a specific button, paste text at insertion point, edit code at current line.
+        - **notification**: Use when the action is APP-WIDE or GENERAL. Examples: format entire file, run build command, open new tab/window, switch applications, search Stack Overflow.
 
         ---
 
@@ -189,20 +203,26 @@ final class AnnotatorService {
         "task_label": "Debugging Database Connection Error",
         "confidence": 0.95,
         "summary": "User encountered 'Connection Refused on Port 5432' error when running docker-compose. Terminal shows PostgreSQL connection failure. Multiple restart attempts visible in command history.",
+        "activity_type": "blocked",
+        "popup_style": "cursor",
         "app": "iTerm2",
         "window_title": "server_logs — zsh"
         }
+        (popup_style is "cursor" because fix command should be typed at terminal cursor)
 
         **BAD RESPONSE (Too Generic):**
         {
         "task_label": "Using Terminal",
         "confidence": 0.6,
         "summary": "User is working in terminal.",
+        "activity_type": "productive",
+        "popup_style": "notification",
         "app": "iTerm2",
         "window_title": "server_logs — zsh"
         }
+        (This is bad because it missed the error - should be "blocked" with higher confidence)
 
-        #### EXAMPLE 2: The "Email Drafter"
+        #### EXAMPLE 2: The "Email Drafter" (productive)
         **Input Context:**
         - App: Google Chrome
         - Window: "Compose: Pitch Deck - Gmail"
@@ -213,11 +233,13 @@ final class AnnotatorService {
         "task_label": "Drafting Email to Investor",
         "confidence": 0.95,
         "summary": "User is composing an email to john@vc.com about 'Pitch Deck' with attached financials. Email references a previous meeting and includes financial documents.",
+        "activity_type": "productive",
+        "popup_style": "cursor",
         "app": "Google Chrome",
         "window_title": "Compose: Pitch Deck - Gmail"
         }
 
-        #### EXAMPLE 3: The "Code Editor"
+        #### EXAMPLE 3: The "Code Editor" (productive)
         **Input Context:**
         - App: Cursor
         - Window: "AppCoordinator.swift"
@@ -228,9 +250,81 @@ final class AnnotatorService {
         "task_label": "Writing API Integration Code",
         "confidence": 0.9,
         "summary": "User is writing GrokClient initialization code in AppCoordinator.swift. Currently editing line 33 where API key is being passed to GrokClient constructor.",
+        "activity_type": "productive",
+        "popup_style": "cursor",
         "app": "Cursor",
         "window_title": "AppCoordinator.swift"
         }
+
+        #### EXAMPLE 4: The "Help Seeker"
+        **Input Context:**
+        - App: Arc
+        - Window: "python TypeError: 'NoneType' - Stack Overflow"
+        - Image: Browser showing Stack Overflow question about TypeError. User has searched for an error they encountered.
+
+        **GOOD RESPONSE:**
+        {
+        "task_label": "Researching Python TypeError",
+        "confidence": 0.9,
+        "summary": "User is searching Stack Overflow for help with a Python TypeError: 'NoneType' error. They are looking for solutions to a bug they encountered.",
+        "activity_type": "help_seeking",
+        "popup_style": "notification",
+        "app": "Arc",
+        "window_title": "python TypeError: 'NoneType' - Stack Overflow"
+        }
+        (popup_style is "notification" because action would be to copy solution and paste elsewhere, not cursor-specific)
+
+        #### EXAMPLE 5: The "Passive Reader"
+        **Input Context:**
+        - App: Safari
+        - Window: "Introduction | React Documentation"
+        - Image: React documentation page showing introductory tutorial content. No errors or searches visible.
+
+        **GOOD RESPONSE:**
+        {
+        "task_label": "Reading React Documentation",
+        "confidence": 0.85,
+        "summary": "User is reading the React documentation introduction page. They appear to be learning or reviewing React concepts.",
+        "activity_type": "passive",
+        "popup_style": "notification",
+        "app": "Safari",
+        "window_title": "Introduction | React Documentation"
+        }
+
+        #### EXAMPLE 6: The "Meeting Attendee"
+        **Input Context:**
+        - App: zoom.us
+        - Window: "Zoom Meeting"
+        - Image: Zoom video call with multiple participants visible in gallery view.
+
+        **GOOD RESPONSE:**
+        {
+        "task_label": "Attending Video Meeting",
+        "confidence": 0.95,
+        "summary": "User is in a Zoom video call with multiple participants. This is an active meeting.",
+        "activity_type": "meeting",
+        "popup_style": "notification",
+        "app": "zoom.us",
+        "window_title": "Zoom Meeting"
+        }
+
+        #### EXAMPLE 7: The "Copy-Paste Workflow" (tedious)
+        **Input Context:**
+        - App: Cursor
+        - Window: "data.json"
+        - Image: Code editor with JSON file. User appears to be copying field names between files.
+
+        **GOOD RESPONSE:**
+        {
+        "task_label": "Copy-Paste Data Fields",
+        "confidence": 0.8,
+        "summary": "User is copying field names from a JSON file, likely to paste into another location. Repetitive copy-paste workflow detected.",
+        "activity_type": "tedious",
+        "popup_style": "cursor",
+        "app": "Cursor",
+        "window_title": "data.json"
+        }
+        (popup_style is "cursor" because paste operation happens at cursor location)
         """
     }
 
@@ -258,14 +352,52 @@ final class AnnotatorService {
         let app = (obj["app"] as? String) ?? fallbackApp
         let window = (obj["window_title"] as? String) ?? fallbackWindow
 
+        // Parse activity_type (default to passive if missing)
+        let activityType = parseActivityType(obj["activity_type"] as? String)
+
+        // Parse popup_style (default to notification if missing)
+        let popupStyle = parsePopupStyle(obj["popup_style"] as? String)
+
         return AnnotatedContext(
             taskLabel: taskLabel,
             confidence: confidence,
             summary: summary,
+            activityType: activityType,
+            popupStyle: popupStyle,
             app: app,
             windowTitle: window,
             timestamp: Date()
         )
+    }
+
+    /// Parse activity type string to enum
+    private static func parseActivityType(_ raw: String?) -> ActivityType {
+        guard let raw = raw?.lowercased().replacingOccurrences(of: "_", with: "") else {
+            return .passive  // Conservative default: don't interrupt
+        }
+
+        switch raw {
+        case "blocked": return .blocked
+        case "helpseeking": return .helpSeeking
+        case "tedious": return .tedious
+        case "passive": return .passive
+        case "meeting": return .meeting
+        case "productive": return .productive
+        default: return .passive  // Conservative default: don't interrupt
+        }
+    }
+
+    /// Parse popup style string to enum
+    private static func parsePopupStyle(_ raw: String?) -> PopupStyle {
+        guard let raw = raw?.lowercased() else {
+            return .notification  // Default to less intrusive
+        }
+
+        switch raw {
+        case "cursor": return .cursor
+        case "notification": return .notification
+        default: return .notification
+        }
     }
 }
 

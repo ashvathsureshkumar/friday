@@ -9,7 +9,9 @@ final class OverlayController {
     private var panel: NSPanel?
     private var promptPanel: NSPanel?
     private var keyboardMonitor: Any?
+    private var localKeyboardMonitor: Any?  // For when panel is focused
     private var mouseMonitor: Any?  // For cursor following
+    private var clickOutsideMonitor: Any?  // For click-outside dismiss
 
     // Decision popup timer
     private var decisionTimer: Timer?
@@ -29,7 +31,7 @@ final class OverlayController {
     private let spaceBackground = NSColor(red: 0x07/255.0, green: 0x0B/255.0, blue: 0x20/255.0, alpha: 0.85)
     private let glowBorderWidth: CGFloat = 2
 
-    func showSuggestion(text: String) {
+    func showSuggestion(text: String, enableKeyboardShortcuts: Bool = false) {
         if panel == nil {
             panel = makePanel()
         }
@@ -39,6 +41,11 @@ final class OverlayController {
             panel.orderFrontRegardless()
             startMouseMonitor()
             startCursorTimer()
+
+            // Enable keyboard shortcuts for cursor-style popups (⌘Y to accept, ⌘N to dismiss)
+            if enableKeyboardShortcuts {
+                startKeyboardMonitor()
+            }
         }
     }
 
@@ -57,13 +64,20 @@ final class OverlayController {
             label.stringValue = text
             positionDecisionTopRight(panel: promptPanel)
             promptPanel.orderFrontRegardless()
+
+            // Focus the panel so keyboard shortcuts work immediately
+            promptPanel.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+
             startKeyboardMonitor()
+            startClickOutsideMonitor()
             startDecisionTimer()
         }
     }
 
     func hideDecision() {
         stopKeyboardMonitor()
+        stopClickOutsideMonitor()
         stopDecisionTimer()
         promptPanel?.orderOut(nil)
     }
@@ -127,7 +141,8 @@ final class OverlayController {
 
             if currentProgress >= progressBarWidth {
                 timer.invalidate()
-                self.hideSuggestion() // Auto-dismiss only cursor popup
+                self.hideSuggestion() // Auto-dismiss cursor popup
+                self.onDecline?()    // Clear state so task can be re-offered
             }
         }
     }
@@ -141,10 +156,40 @@ final class OverlayController {
     private func startKeyboardMonitor() {
         stopKeyboardMonitor()
 
-        keyboardMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self, self.promptPanel?.isVisible == true else { return }
+        // Check if either panel is visible
+        let isAnyPanelVisible: () -> Bool = { [weak self] in
+            guard let self = self else { return false }
+            return (self.promptPanel?.isVisible == true) || (self.panel?.isVisible == true)
+        }
+
+        // Handler for keyboard events
+        let handleKeyEvent: (NSEvent) -> NSEvent? = { [weak self] event in
+            guard let self = self, isAnyPanelVisible() else { return event }
 
             // Check for Command modifier
+            let hasCommand = event.modifierFlags.contains(.command)
+            guard hasCommand else { return event }
+
+            if let chars = event.characters?.lowercased() {
+                if chars == "y" {
+                    DispatchQueue.main.async {
+                        self.handleYes()
+                    }
+                    return nil  // Consume the event
+                } else if chars == "n" {
+                    DispatchQueue.main.async {
+                        self.handleNo()
+                    }
+                    return nil  // Consume the event
+                }
+            }
+            return event
+        }
+
+        // Global monitor for when other apps are focused
+        keyboardMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self, isAnyPanelVisible() else { return }
+
             let hasCommand = event.modifierFlags.contains(.command)
             guard hasCommand else { return }
 
@@ -160,12 +205,19 @@ final class OverlayController {
                 }
             }
         }
+
+        // Local monitor for when our panel is focused
+        localKeyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: handleKeyEvent)
     }
 
     private func stopKeyboardMonitor() {
         if let monitor = keyboardMonitor {
             NSEvent.removeMonitor(monitor)
             keyboardMonitor = nil
+        }
+        if let monitor = localKeyboardMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyboardMonitor = nil
         }
     }
 
@@ -184,6 +236,39 @@ final class OverlayController {
         if let monitor = mouseMonitor {
             NSEvent.removeMonitor(monitor)
             mouseMonitor = nil
+        }
+    }
+
+    private func startClickOutsideMonitor() {
+        stopClickOutsideMonitor()
+
+        // Monitor for clicks outside the decision panel
+        clickOutsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            guard let self = self,
+                  let panel = self.promptPanel,
+                  panel.isVisible else { return }
+
+            // Check if click is outside the panel
+            let clickLocation = event.locationInWindow
+            let screenLocation = NSEvent.mouseLocation
+
+            // Get panel frame in screen coordinates
+            let panelFrame = panel.frame
+
+            if !panelFrame.contains(screenLocation) {
+                // Click was outside the panel - just defocus, don't dismiss
+                // The timer will handle auto-dismiss, or user can click back
+                DispatchQueue.main.async {
+                    panel.orderBack(nil)
+                }
+            }
+        }
+    }
+
+    private func stopClickOutsideMonitor() {
+        if let monitor = clickOutsideMonitor {
+            NSEvent.removeMonitor(monitor)
+            clickOutsideMonitor = nil
         }
     }
 
@@ -282,7 +367,7 @@ final class OverlayController {
 
         let panel = NSPanel(
             contentRect: NSRect(x: 20, y: NSScreen.main?.frame.height ?? 800 - 80, width: panelWidth, height: panelHeight),
-            styleMask: [.borderless, .nonactivatingPanel],
+            styleMask: [.borderless],  // Removed nonactivatingPanel to allow focus
             backing: .buffered,
             defer: false
         )
@@ -292,6 +377,7 @@ final class OverlayController {
         panel.level = .statusBar
         panel.hidesOnDeactivate = false
         panel.hasShadow = true
+        panel.becomesKeyOnlyIfNeeded = false  // Allow panel to become key window
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
         contentView.wantsLayer = true
@@ -342,49 +428,57 @@ final class OverlayController {
         label.lineBreakMode = .byTruncatingTail
         blurView.addSubview(label)
 
-        // Keyboard shortcut hints
+        // Clickable buttons with keyboard shortcut hints
         let hintsContainer = NSView(frame: NSRect(x: 16, y: 20, width: panelWidth - glowBorderWidth * 2 - 32, height: 24))
         hintsContainer.wantsLayer = true
 
-        // ⌘Y key hint
-        let yKey = NSView(frame: NSRect(x: 0, y: 0, width: 38, height: 24))
-        yKey.wantsLayer = true
-        yKey.layer?.cornerRadius = 6
-        yKey.layer?.backgroundColor = accentColor.withAlphaComponent(0.5).cgColor
+        // Accept button (⌘Y)
+        let acceptButton = NSButton(frame: NSRect(x: 0, y: 0, width: 90, height: 24))
+        acceptButton.title = ""
+        acceptButton.bezelStyle = .inline
+        acceptButton.isBordered = false
+        acceptButton.wantsLayer = true
+        acceptButton.layer?.cornerRadius = 6
+        acceptButton.layer?.backgroundColor = accentColor.withAlphaComponent(0.5).cgColor
+        acceptButton.target = self
+        acceptButton.action = #selector(handleYes)
 
-        let yLabel = NSTextField(labelWithString: "⌘Y")
-        yLabel.frame = NSRect(x: 0, y: 2, width: 38, height: 20)
-        yLabel.alignment = .center
-        yLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        yLabel.textColor = .white
-        yKey.addSubview(yLabel)
-        hintsContainer.addSubview(yKey)
+        // Create attributed string for button title
+        let acceptTitle = NSMutableAttributedString()
+        acceptTitle.append(NSAttributedString(string: "⌘Y ", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.white
+        ]))
+        acceptTitle.append(NSAttributedString(string: "Accept", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.85)
+        ]))
+        acceptButton.attributedTitle = acceptTitle
+        hintsContainer.addSubview(acceptButton)
 
-        let yesText = NSTextField(labelWithString: "Accept")
-        yesText.frame = NSRect(x: 44, y: 2, width: 50, height: 20)
-        yesText.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        yesText.textColor = .white.withAlphaComponent(0.7)
-        hintsContainer.addSubview(yesText)
+        // Dismiss button (⌘N)
+        let dismissButton = NSButton(frame: NSRect(x: hintsContainer.frame.width - 94, y: 0, width: 94, height: 24))
+        dismissButton.title = ""
+        dismissButton.bezelStyle = .inline
+        dismissButton.isBordered = false
+        dismissButton.wantsLayer = true
+        dismissButton.layer?.cornerRadius = 6
+        dismissButton.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        dismissButton.target = self
+        dismissButton.action = #selector(handleNo)
 
-        // ⌘N key hint
-        let nKey = NSView(frame: NSRect(x: hintsContainer.frame.width - 94, y: 0, width: 38, height: 24))
-        nKey.wantsLayer = true
-        nKey.layer?.cornerRadius = 6
-        nKey.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.15).cgColor
-
-        let nLabel = NSTextField(labelWithString: "⌘N")
-        nLabel.frame = NSRect(x: 0, y: 2, width: 38, height: 20)
-        nLabel.alignment = .center
-        nLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        nLabel.textColor = .white.withAlphaComponent(0.8)
-        nKey.addSubview(nLabel)
-        hintsContainer.addSubview(nKey)
-
-        let noText = NSTextField(labelWithString: "Dismiss")
-        noText.frame = NSRect(x: hintsContainer.frame.width - 50, y: 2, width: 50, height: 20)
-        noText.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        noText.textColor = .white.withAlphaComponent(0.7)
-        hintsContainer.addSubview(noText)
+        // Create attributed string for dismiss button
+        let dismissTitle = NSMutableAttributedString()
+        dismissTitle.append(NSAttributedString(string: "⌘N ", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.8)
+        ]))
+        dismissTitle.append(NSAttributedString(string: "Dismiss", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.7)
+        ]))
+        dismissButton.attributedTitle = dismissTitle
+        hintsContainer.addSubview(dismissButton)
 
         blurView.addSubview(hintsContainer)
 
@@ -411,12 +505,12 @@ final class OverlayController {
     }
 
     @objc private func handleYes() {
-        hideDecision()
+        hideAll()  // Hide both panels
         onAccept?()
     }
 
     @objc private func handleNo() {
-        hideDecision()
+        hideAll()  // Hide both panels
         onDecline?()
     }
 

@@ -333,39 +333,30 @@ final class AppCoordinator {
     private func executeCurrentTask() {
         guard let taskId = stateStore.currentTaskId else { return }
         Logger.shared.log("Execute requested for task \(taskId)")
+
+        // Use stored annotation from ExecutionAgent instead of re-annotating
+        guard let context = executionAgent.getCurrentAnnotation() else {
+            Logger.shared.log("Execute failed: No annotation context available")
+            return
+        }
+
+        Logger.shared.log("Using stored annotation: '\(context.taskLabel)'")
+
+        // Get any recent keystrokes from buffer (optional, for additional context)
         Task { [weak self] in
             guard let self = self else { return }
-
-            // Consume current buffer state for execution
             let batch = await self.contextBuffer.consumeAndClear()
+            let keystrokes = batch?.keystrokes ?? ""
 
-            // If no batch exists, create one from fresh screen capture
-            let executionBatch: BufferBatch
-            if let batch = batch {
-                executionBatch = batch
-            } else if let frame = await self.captureService.captureActiveScreen() {
-                executionBatch = BufferBatch(keystrokes: "", screenFrame: frame, timestamp: Date())
-            } else {
-                Logger.shared.log("Execute failed: Unable to capture screen")
-                return
-            }
-
-            let result = await self.annotator.annotate(batch: executionBatch)
-            switch result {
-            case .failure(let error):
-                Logger.shared.log("Annotate before execute failed: \(error)")
-            case .success(let context):
-                // Pass batch context for comprehensive execution
-                self.executor.planAndExecute(task: context, keystrokes: executionBatch.keystrokes) { execResult in
-                    switch execResult {
-                    case .failure(let error):
-                        Logger.shared.log("Plan/execute failed: \(error)")
-                    case .success(let plan):
-                        Logger.shared.log("Execution plan stored for \(taskId)")
-                        self.stateStore.markCompleted(taskId: taskId)
-                        self.pushExecutionResult(taskId: taskId, plan: plan)
-                        self.overlay.hideAll()
-                    }
+            self.executor.planAndExecute(task: context, keystrokes: keystrokes) { execResult in
+                switch execResult {
+                case .failure(let error):
+                    Logger.shared.log("Plan/execute failed: \(error)")
+                case .success(let plan):
+                    Logger.shared.log("Execution plan stored for \(taskId)")
+                    self.stateStore.markCompleted(taskId: taskId)
+                    self.pushExecutionResult(taskId: taskId, plan: plan)
+                    self.overlay.hideAll()
                 }
             }
         }

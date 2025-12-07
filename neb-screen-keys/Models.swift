@@ -11,10 +11,58 @@ struct ScreenFrame {
     let windowTitle: String
 }
 
+/// Activity type classification from the Annotator
+/// Used by pre-filter to determine if automation should be triggered
+enum ActivityType: String, Codable {
+    case blocked       // User is stuck: errors, failures, connection refused
+    case helpSeeking   // User is searching for solutions: googling errors, Stack Overflow
+    case tedious       // Repetitive task that automation could speed up
+    case passive       // Reading docs, watching video, casual browsing
+    case meeting       // Video call, screen sharing
+    case productive    // Actively coding/writing in flow state
+
+    /// Map from JSON string to enum (handles snake_case from API)
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+
+        // Handle snake_case from API - default to passive (conservative) if unknown
+        switch rawValue.lowercased().replacingOccurrences(of: "_", with: "") {
+        case "blocked": self = .blocked
+        case "helpseeking": self = .helpSeeking
+        case "tedious": self = .tedious
+        case "passive": self = .passive
+        case "meeting": self = .meeting
+        case "productive": self = .productive
+        default: self = .passive  // Conservative default: don't interrupt
+        }
+    }
+}
+
+/// Popup style for showing automation suggestions
+/// Determined by the Annotator based on whether action is cursor-contextual or app-wide
+enum PopupStyle: String, Codable {
+    case cursor       // Follow mouse - action is specific to cursor location
+    case notification // Top-right - action is app-wide or general
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+
+        switch rawValue.lowercased() {
+        case "cursor": self = .cursor
+        case "notification": self = .notification
+        default: self = .notification  // Default to less intrusive
+        }
+    }
+}
+
 struct AnnotatedContext: Codable {
     let taskLabel: String
     let confidence: Double
     let summary: String
+    let activityType: ActivityType
+    let popupStyle: PopupStyle
     let app: String
     let windowTitle: String
     let timestamp: Date
