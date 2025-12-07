@@ -8,14 +8,10 @@ import CryptoKit
 
 final class AppCoordinator {
     private let stateStore = TaskStateStore()
-    private let eventMonitor = EventMonitor()
-    private let keystrokeMonitor = KeystrokeMonitor()
-    private let spaceMonitor = SpaceMonitor()
-    private let mouseMonitor = MouseMonitor()
+    private let eventMonitor = EventMonitor()  // Only used for chat toggle
     private let captureService = ScreenCaptureService()
     private let overlay = OverlayController()
     private let chatOverlay = ChatOverlayController()
-    private let contextBuffer = ContextBufferService()
     private let annotationBuffer = AnnotationBufferService()
 
     private let annotator: AnnotatorService
@@ -25,14 +21,8 @@ final class AppCoordinator {
     private let executionAgent: ExecutionAgent
     private var chatHistory: [GrokMessage] = []
 
-    // MARK: - Producer Flow State
-    private var lastScreenCaptureTime: Date?
-    private let screenCaptureThrottleInterval: TimeInterval = 0.5 // 500ms throttle
-    private var lastSpaceChangeTime: Date?
-    private var lastAppSwitchTime: Date?
+    // MARK: - State
     private var consumerTask: Task<Void, Never>?
-    private var nebulaConsumerTask: Task<Void, Never>?
-    private var executionConsumerTask: Task<Void, Never>?
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=") {
@@ -76,10 +66,7 @@ final class AppCoordinator {
                 Logger.shared.log("Accessibility permission not granted; keystroke monitoring and automation will fail.")
             }
 
-            // PRODUCER FLOW: Event monitors push to buffer instead of direct annotation
-            self.eventMonitor.onShortcut = { [weak self] shortcut in
-                self?.handleProducerEvent(shortcut: shortcut)
-            }
+            // Keep chat toggle functionality
             self.eventMonitor.onChatToggle = { [weak self] in
                 DispatchQueue.main.async {
                     self?.chatOverlay.toggle()
@@ -87,59 +74,18 @@ final class AppCoordinator {
             }
             self.eventMonitor.start()
 
-            self.keystrokeMonitor.onKeyEvent = { [weak self] in
-                self?.handleKeystroke()
-            }
-            self.keystrokeMonitor.start()
-
-            // Space/App change monitor - triggers capture on context switches
-            self.spaceMonitor.onChange = { [weak self] reason in
-                Logger.shared.log(.event, "Space/app change detected: \(reason)")
-                guard let self = self else { return }
-                
-                // Always capture space changes (they're important context switches)
-                // Only deduplicate app_switch if space_change just happened (space_change takes priority)
-                let now = Date()
-                if reason == "space_change" {
-                    self.lastSpaceChangeTime = now
-                    // Always capture space changes - they're important
-                    self.captureAndBuffer(reason: reason)
-                } else if reason == "app_switch" {
-                    self.lastAppSwitchTime = now
-                    // If space change happened very recently (< 200ms), skip app switch (space change already captured)
-                    if let lastSpaceChange = self.lastSpaceChangeTime,
-                       now.timeIntervalSince(lastSpaceChange) < 0.2 {
-                        Logger.shared.log(.event, "App switch skipped (space change captured recently)")
-                        return
-                    }
-                    // Otherwise, capture the app switch
-                    self.captureAndBuffer(reason: reason)
-                }
-            }
-            self.spaceMonitor.start()
-
-            // Mouse click monitor - triggers capture on user clicks
-            self.mouseMonitor.onClick = { [weak self] in
-                Logger.shared.log(.event, "Mouse click detected")
-                self?.captureAndBuffer(reason: "user_click")
-            }
-            self.mouseMonitor.start()
-
-            // Clear assets folder on launch to prevent screenshot buildup
-            self.clearAssetsFolder()
-
             // Clear Nebula memories on launch FIRST (for demo purposes)
             // This must complete before starting consumers to ensure collection exists
             self.clearNebulaMemories { [weak self] success in
                 guard let self = self else { return }
                 if success {
-                    Logger.shared.log(.nebula, "✅ Collection ready, starting consumers...")
+                    Logger.shared.log(.nebula, "✅ Collection ready, starting polling loop...")
                 } else {
                     Logger.shared.log(.nebula, "⚠️ Collection setup had issues, but continuing...")
                 }
                 
-                // CONSUMER FLOW: Start the periodic AI processing loop
-                self.startAnnotatorLoop()
+                // Start the simple polling loop: capture and annotate every 2 seconds
+                self.startPollingLoop()
                 
                 // CONSUMER A: Start Nebula consumer (stores all annotations)
                 self.startNebulaConsumer()
@@ -147,154 +93,59 @@ final class AppCoordinator {
                 // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
                 self.startExecutionAgentConsumer()
             }
-
-            // Initial screen capture on launch (with delay to ensure permissions are processed)
-            Logger.shared.log(.capture, "Scheduling initial capture on launch...")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                Logger.shared.log(.capture, "Executing initial capture on launch...")
-                self?.captureAndBuffer(reason: "launch")
-            }
         }
     }
 
-    // MARK: - Producer Flow (High Speed)
+    // MARK: - Polling Loop (Simplified)
 
-    /// Handle shortcut events by buffering keystroke marker and triggering screen capture
-    private func handleProducerEvent(shortcut: String) {
-        Task { [weak self] in
-            guard let self = self else { return }
-            await self.contextBuffer.append(keystrokes: "[SHORTCUT:\(shortcut)]")
-            self.captureAndBuffer(reason: "shortcut")
-        }
-    }
-
-    /// Handle keystroke events by buffering and triggering throttled screen capture
-    private func handleKeystroke() {
-        Task { [weak self] in
-            guard let self = self else { return }
-            await self.contextBuffer.append(keystrokes: ".")
-            self.captureAndBuffer(reason: "keystroke")
-        }
-    }
-
-    /// Capture screen and buffer it (with throttling)
-    private func captureAndBuffer(reason: String) {
-        Logger.shared.log(.capture, "🔍 captureAndBuffer called with reason: \(reason)")
-        
-        // Throttle screen captures to avoid performance hits
-        // BUT: Allow space_change and user_click to bypass throttling (they're important user actions)
-        let shouldThrottle = reason != "space_change" && reason != "user_click"
-        
-        let now = Date()
-        if shouldThrottle,
-           let lastCapture = lastScreenCaptureTime,
-           now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
-            // Skip this capture, too soon
-            Logger.shared.log(.capture, "⏭️ Capture skipped (throttled). Reason: \(reason), lastCapture: \(lastCapture.timeIntervalSinceNow) seconds ago")
-            return
-        }
-
-        lastScreenCaptureTime = now
-        Logger.shared.log(.capture, "🚀 Initiating screen capture. Reason: \(reason)")
-
-        Task { [weak self] in
-            guard let self = self else {
-                Logger.shared.log(.capture, "❌ Self is nil in capture task")
-                return
-            }
-            Logger.shared.log(.capture, "▶️ Starting async capture task...")
-            
-            let frame = await self.captureService.captureActiveScreen()
-            
-            if let frame = frame {
-                Logger.shared.log(.capture, "✅ Screen capture succeeded, storing in buffer...")
-                await self.contextBuffer.updateLatestScreen(frame)
-                Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
-                
-                // Save screenshot for debugging
-                self.saveScreenshot(frame.image, reason: reason)
-                
-                // Debug: Check buffer state after storing
-                let stats = await self.contextBuffer.getStats()
-                Logger.shared.log(.capture, "📊 Buffer stats after capture: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen)")
-            } else {
-                Logger.shared.log(.capture, "❌ Screen capture returned nil (\(reason))")
-            }
-        }
-    }
-
-    // MARK: - Consumer Flow (AI Pace)
-
-    /// Start the periodic annotation loop that consumes buffered data
-    private func startAnnotatorLoop() {
-        Logger.shared.log(.flow, "Consumer loop starting (2s interval)...")
+    /// Simple polling loop: capture screenshot every 2 seconds and send directly to Grok
+    private func startPollingLoop() {
+        Logger.shared.log(.flow, "Starting polling loop (2s interval)...")
 
         consumerTask = Task { [weak self] in
             guard let self = self else { return }
 
             while !Task.isCancelled {
-                // Wait for interval (2 seconds for frequent active window capture)
+                // Wait for interval (2 seconds)
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
 
-                Logger.shared.log(.flow, "Loop tick. Checking buffer...")
+                Logger.shared.log(.flow, "Polling tick. Capturing screenshot...")
 
-                // Check if buffer has data
-                let stats = await self.contextBuffer.getStats()
-                Logger.shared.log(.flow, "📊 Buffer state: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen), lastUpdate=\(stats.lastUpdate?.timeIntervalSinceNow ?? -999)")
+                // Capture screenshot
+                let frame = await self.captureService.captureActiveScreen()
                 
-                let hasData = await self.contextBuffer.hasData()
-                guard hasData else {
-                    Logger.shared.log(.flow, "❌ Buffer empty, skipping annotation")
+                guard let frame = frame else {
+                    Logger.shared.log(.flow, "⚠️ Screenshot capture failed, skipping this cycle")
                     continue
                 }
                 
-                Logger.shared.log(.flow, "✅ Buffer has data! Proceeding to consume...")
-
-                // Capture a fresh screenshot before processing (ensures we always have latest screen state)
-                Logger.shared.log(.flow, "📸 Capturing fresh screenshot for annotation...")
-                let freshFrame = await self.captureService.captureActiveScreen()
-                if let frame = freshFrame {
-                    await self.contextBuffer.updateLatestScreen(frame)
-                    Logger.shared.log(.flow, "✅ Fresh screenshot captured and buffered")
-                } else {
-                    Logger.shared.log(.flow, "⚠️ Fresh capture failed, using buffered frame")
-                }
-
-                // Consume buffer (now with fresh screenshot)
-                guard let batch = await self.contextBuffer.consumeAndClear() else {
-                    Logger.shared.log(.flow, "Buffer had data but consumeAndClear returned nil")
-                    continue
-                }
-
-                Logger.shared.log(.flow, "Processing batch: \(batch.keystrokes.count) chars, screen=\(batch.screenFrame != nil)")
-
-                // Process with annotator
-                await self.processBufferBatch(batch)
+                Logger.shared.log(.flow, "✅ Screenshot captured - App: \(frame.appName), Window: \(frame.windowTitle), Size: \(Int(frame.image.size.width))x\(Int(frame.image.size.height))")
+                
+                // Create batch with screenshot (no keystrokes needed)
+                let batch = BufferBatch(
+                    keystrokes: "",
+                    screenFrame: frame,
+                    timestamp: Date()
+                )
+                
+                // Send directly to annotator
+                await self.processBatch(batch)
             }
 
-            Logger.shared.log(.flow, "Consumer loop stopped")
+            Logger.shared.log(.flow, "Polling loop stopped")
         }
     }
 
-    /// Process a consumed buffer batch through the annotator
-    private func processBufferBatch(_ batch: BufferBatch) async {
-        Logger.shared.log(.flow, "Sending batch to annotator...")
-        
-        // Save screenshot to assets for every annotation (debugging)
-        if let frame = batch.screenFrame {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss-SSS"
-            let timestamp = formatter.string(from: batch.timestamp)
-            let reason = "annotation_\(timestamp)"
-            self.saveScreenshot(frame.image, reason: reason)
-        }
+    /// Process a batch through the annotator
+    private func processBatch(_ batch: BufferBatch) async {
+        Logger.shared.log(.flow, "Sending screenshot to annotator...")
 
         let result = await self.annotator.annotate(batch: batch)
         switch result {
         case .failure(let error):
             Logger.shared.log(.flow, "Annotation failed: \(error.localizedDescription)")
         case .success(let context):
-            // Simply publish to annotation buffer - consumers will handle the rest
+            // Publish to annotation buffer - consumers will handle the rest
             await self.annotationBuffer.publish(context)
         }
     }
@@ -302,17 +153,17 @@ final class AppCoordinator {
     // MARK: - Annotation Buffer Consumers
     
     /// Consumer A: Nebula - Stores all annotations to memory
+    /// Simplified: Uses direct callback instead of AsyncStream
     private func startNebulaConsumer() {
         Logger.shared.log(.stream, "Starting Nebula consumer...")
         
-        nebulaConsumerTask = Task { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
             
-            // Subscribe to annotation stream
-            let stream = await self.annotationBuffer.makeStream()
-            
-            // Process each annotation
-            for await annotation in stream {
+            // Register handler for Nebula consumer
+            await self.annotationBuffer.setNebulaHandler { [weak self] annotation in
+                guard let self = self else { return }
+                
                 Logger.shared.log(.nebula, "Nebula consumed event: '\(annotation.taskLabel)'")
                 
                 // Generate task ID for metadata
@@ -349,28 +200,23 @@ final class AppCoordinator {
                     }
                 }
             }
-            
-            Logger.shared.log(.stream, "Nebula consumer stopped")
         }
     }
     
     /// Consumer B: Execution Agent - Determines if automation should be triggered
+    /// Simplified: Uses direct callback instead of AsyncStream
     private func startExecutionAgentConsumer() {
         Logger.shared.log(.stream, "Starting Execution Agent consumer...")
         
-        executionConsumerTask = Task { [weak self] in
+        Task { [weak self] in
             guard let self = self else { return }
             
-            // Subscribe to annotation stream
-            let stream = await self.annotationBuffer.makeStream()
-            
-            // Process each annotation
-            for await annotation in stream {
+            // Register handler for Execution Agent consumer
+            await self.annotationBuffer.setExecutionHandler { [weak self] annotation in
+                guard let self = self else { return }
                 // Delegate to execution agent
                 self.executionAgent.processAnnotation(annotation)
             }
-            
-            Logger.shared.log(.stream, "Execution Agent consumer stopped")
         }
     }
 
@@ -386,13 +232,11 @@ final class AppCoordinator {
 
         Logger.shared.log("Using stored annotation: '\(context.taskLabel)'")
 
-        // Get any recent keystrokes from buffer (optional, for additional context)
+        // Execute the task (no keystrokes needed for simplified flow)
         Task { [weak self] in
             guard let self = self else { return }
-            let batch = await self.contextBuffer.consumeAndClear()
-            let keystrokes = batch?.keystrokes ?? ""
 
-            self.executor.planAndExecute(task: context, keystrokes: keystrokes) { execResult in
+            self.executor.planAndExecute(task: context, keystrokes: "") { execResult in
                 switch execResult {
                 case .failure(let error):
                     Logger.shared.log("Plan/execute failed: \(error)")
@@ -480,76 +324,6 @@ final class AppCoordinator {
         }
 
         return nil
-    }
-    
-    // MARK: - Debug Helpers
-    
-    /// Clear the assets folder to prevent screenshot buildup
-    private func clearAssetsFolder() {
-        let projectRoot = "/Users/vagminviswanathan/Desktop/happyNebula/friday"
-        let assetsURL = URL(fileURLWithPath: projectRoot).appendingPathComponent("assets")
-        
-        guard FileManager.default.fileExists(atPath: assetsURL.path) else {
-            Logger.shared.log(.capture, "📁 Assets folder doesn't exist, skipping clear")
-            return
-        }
-        
-        do {
-            let contents = try FileManager.default.contentsOfDirectory(at: assetsURL, includingPropertiesForKeys: nil, options: [])
-            var deletedCount = 0
-            for fileURL in contents {
-                try FileManager.default.removeItem(at: fileURL)
-                deletedCount += 1
-            }
-            Logger.shared.log(.capture, "🧹 Cleared assets folder: deleted \(deletedCount) file(s)")
-        } catch {
-            Logger.shared.log(.capture, "⚠️ Failed to clear assets folder: \(error.localizedDescription)")
-        }
-    }
-    
-    /// Save screenshot to desktop folder and assets folder for debugging
-    private func saveScreenshot(_ image: NSImage, reason: String) {
-        Task {
-            // Generate filename with timestamp
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-            let timestamp = formatter.string(from: Date())
-            let filename = "capture_\(timestamp)_\(reason).png"
-            
-            // Convert NSImage to PNG data
-            guard let tiffData = image.tiffRepresentation,
-                  let bitmap = NSBitmapImageRep(data: tiffData),
-                  let pngData = bitmap.representation(using: .png, properties: [:]) else {
-                Logger.shared.log(.capture, "❌ Failed to convert image to PNG for saving")
-                return
-            }
-            
-            // Save to desktop (backward compatibility)
-            let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
-            let desktopFolderURL = desktopURL.appendingPathComponent("neb-screen-captures")
-            try? FileManager.default.createDirectory(at: desktopFolderURL, withIntermediateDirectories: true)
-            let desktopFileURL = desktopFolderURL.appendingPathComponent(filename)
-            
-            do {
-                try pngData.write(to: desktopFileURL)
-                Logger.shared.log(.capture, "💾 Screenshot saved to desktop: \(desktopFileURL.path)")
-            } catch {
-                Logger.shared.log(.capture, "❌ Failed to save screenshot to desktop: \(error.localizedDescription)")
-            }
-            
-            // Save to assets folder (project root)
-            let projectRoot = "/Users/vagminviswanathan/Desktop/happyNebula/friday"
-            let assetsURL = URL(fileURLWithPath: projectRoot).appendingPathComponent("assets")
-            try? FileManager.default.createDirectory(at: assetsURL, withIntermediateDirectories: true)
-            let assetsFileURL = assetsURL.appendingPathComponent(filename)
-            
-            do {
-                try pngData.write(to: assetsFileURL)
-                Logger.shared.log(.capture, "💾 Screenshot saved to assets: \(assetsFileURL.path)")
-            } catch {
-                Logger.shared.log(.capture, "❌ Failed to save screenshot to assets: \(error.localizedDescription)")
-            }
-        }
     }
     
     /// Clear all Nebula memories on app launch by deleting and recreating the collection

@@ -98,52 +98,38 @@ final class TaskStateStore {
 
 // MARK: - Annotation Buffer Service
 
-/// Actor-based annotation buffer that supports multicasting to multiple consumers
+/// Simplified annotation buffer that directly notifies consumers
 actor AnnotationBufferService {
-    private var continuations: [UUID: AsyncStream<AnnotatedContext>.Continuation] = [:]
+    /// Callback to notify Nebula consumer
+    private var nebulaHandler: ((AnnotatedContext) -> Void)?
     
-    /// Publish an annotation to all active subscribers
+    /// Callback to notify Execution Agent consumer
+    private var executionHandler: ((AnnotatedContext) -> Void)?
+    
+    /// Register handler for Nebula consumer
+    func setNebulaHandler(_ handler: @escaping (AnnotatedContext) -> Void) {
+        nebulaHandler = handler
+        Logger.shared.log(.stream, "Nebula handler registered")
+    }
+    
+    /// Register handler for Execution Agent consumer
+    func setExecutionHandler(_ handler: @escaping (AnnotatedContext) -> Void) {
+        executionHandler = handler
+        Logger.shared.log(.stream, "Execution Agent handler registered")
+    }
+    
+    /// Publish an annotation to all registered consumers
     func publish(_ annotation: AnnotatedContext) {
-        let activeCount = continuations.count
-        Logger.shared.log(.stream, "Broadcasting annotation to \(activeCount) subscriber(s): '\(annotation.taskLabel)'")
+        Logger.shared.log(.stream, "Publishing annotation: '\(annotation.taskLabel)'")
         
-        // Broadcast to all active continuations
-        for (id, continuation) in continuations {
-            continuation.yield(annotation)
-        }
-    }
-    
-    /// Create a new stream for a consumer to subscribe
-    /// Returns an AsyncStream that will receive all published annotations
-    func makeStream() -> AsyncStream<AnnotatedContext> {
-        let id = UUID()
-        
-        let stream = AsyncStream<AnnotatedContext> { continuation in
-            // Store the continuation for broadcasting
-            Task {
-                await self.storeContinuation(id: id, continuation: continuation)
-            }
-            
-            // Clean up when stream is terminated
-            continuation.onTermination = { @Sendable _ in
-                Task {
-                    await self.removeContinuation(id: id)
-                }
-            }
+        // Directly call registered handlers (simpler than AsyncStream)
+        if let nebulaHandler = nebulaHandler {
+            nebulaHandler(annotation)
         }
         
-        Logger.shared.log(.stream, "New stream created (ID: \(id.uuidString.prefix(8))...). Total subscribers: \(continuations.count + 1)")
-        
-        return stream
-    }
-    
-    private func storeContinuation(id: UUID, continuation: AsyncStream<AnnotatedContext>.Continuation) {
-        continuations[id] = continuation
-    }
-    
-    private func removeContinuation(id: UUID) {
-        continuations.removeValue(forKey: id)
-        Logger.shared.log(.stream, "Stream terminated (ID: \(id.uuidString.prefix(8))...). Remaining subscribers: \(continuations.count)")
+        if let executionHandler = executionHandler {
+            executionHandler(annotation)
+        }
     }
 }
 
