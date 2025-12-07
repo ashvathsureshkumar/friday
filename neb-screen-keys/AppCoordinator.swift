@@ -13,6 +13,8 @@ final class AppCoordinator {
     private let overlay = OverlayController()
     private let chatOverlay = ChatOverlayController()
     private let annotationBuffer = AnnotationBufferService()
+    private let voiceActivation = VoiceActivationService()
+    private let welcomeAnimation = WelcomeAnimationController()
 
     private let annotator: AnnotatorService
     private let executor: ExecutorService
@@ -26,6 +28,7 @@ final class AppCoordinator {
     // MARK: - State
     private var consumerTask: Task<Void, Never>?
     private var pendingAppleScript: String?
+    private var isActivated = false  // Track if voice activation has occurred
 
     init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
          nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=") {
@@ -78,6 +81,11 @@ final class AppCoordinator {
         chatOverlay.onChatOpened = { [weak self] in
             self?.sendProactiveGreeting()
         }
+        
+        // Setup voice activation callback
+        voiceActivation.onWakeWordDetected = { [weak self] in
+            self?.handleWakeWordDetected()
+        }
     }
 
     func start() {
@@ -91,33 +99,71 @@ final class AppCoordinator {
                 Logger.shared.log("Accessibility permission not granted; keystroke monitoring and automation will fail.")
             }
 
-            // Keep chat toggle functionality
+            // Keep chat toggle functionality (but only works after activation)
             self.eventMonitor.onChatToggle = { [weak self] in
+                guard let self = self, self.isActivated else { return }
                 DispatchQueue.main.async {
-                    self?.chatOverlay.toggle()
+                    self.chatOverlay.toggle()
                 }
             }
             self.eventMonitor.start()
 
-            // Create a new Nebula collection on launch
-            // This must complete before starting consumers to ensure collection exists
-            self.setupNebulaCollection { [weak self] success in
+            // Request speech recognition permissions and start voice activation
+            self.voiceActivation.requestPermissions { [weak self] granted in
                 guard let self = self else { return }
-                if success {
-                    Logger.shared.log(.nebula, "✅ Collection ready, starting polling loop...")
+                if granted {
+                    Logger.shared.log(.system, "🎤 Starting voice activation - waiting for 'daddy's home'...")
+                    self.voiceActivation.startListening()
                 } else {
-                    Logger.shared.log(.nebula, "⚠️ Collection setup had issues, but continuing...")
+                    Logger.shared.log(.system, "❌ Speech recognition not authorized - starting normally")
+                    self.startNormalWorkflow()
                 }
-                
-                // Start the simple polling loop: capture and annotate every 2 seconds
-                self.startPollingLoop()
-                
-                // CONSUMER A: Start Nebula consumer (stores all annotations)
-                self.startNebulaConsumer()
-                
-                // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
-                self.startExecutionAgentConsumer()
             }
+        }
+    }
+    
+    // MARK: - Voice Activation
+    
+    private func handleWakeWordDetected() {
+        guard !isActivated else {
+            Logger.shared.log(.system, "⚠️ Already activated, ignoring wake word")
+            return
+        }
+        
+        Logger.shared.log(.system, "🎉 Wake word detected! Showing welcome animation...")
+        
+        // Show welcome animation
+        welcomeAnimation.show { [weak self] in
+            guard let self = self else { return }
+            Logger.shared.log(.system, "✅ Welcome animation complete - starting normal workflow")
+            self.startNormalWorkflow()
+        }
+    }
+    
+    private func startNormalWorkflow() {
+        guard !isActivated else { return }
+        isActivated = true
+        
+        Logger.shared.log(.system, "🚀 Starting F.R.I.D.A.Y. normal workflow...")
+        
+        // Create a new Nebula collection on launch
+        // This must complete before starting consumers to ensure collection exists
+        self.setupNebulaCollection { [weak self] success in
+            guard let self = self else { return }
+            if success {
+                Logger.shared.log(.nebula, "✅ Collection ready, starting polling loop...")
+            } else {
+                Logger.shared.log(.nebula, "⚠️ Collection setup had issues, but continuing...")
+            }
+            
+            // Start the simple polling loop: capture and annotate every 2 seconds
+            self.startPollingLoop()
+            
+            // CONSUMER A: Start Nebula consumer (stores all annotations)
+            self.startNebulaConsumer()
+            
+            // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
+            self.startExecutionAgentConsumer()
         }
     }
 

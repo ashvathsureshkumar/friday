@@ -4,9 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is `neb-screen-keys`, a macOS app that provides AI-assisted task automation through screen monitoring and context awareness. The app monitors user activity, captures screen context, uses Grok AI to understand tasks, retrieves relevant memories from Nebula, and generates/executes interactive AppleScript automation.
+This is `neb-screen-keys` (F.R.I.D.A.Y.), a macOS app that provides AI-assisted task automation through screen monitoring and context awareness. The app features **voice activation** with the wake word "daddy's home", monitors user activity, captures screen context, uses Grok AI to understand tasks, retrieves relevant memories from Nebula, and generates/executes interactive AppleScript automation.
 
 The app uses a **Producer-Consumer architecture** where user events are buffered at high speed (producer) and processed by AI every 3 seconds (consumer), preventing performance degradation while maintaining context awareness.
+
+### Voice Activation
+- **Wake Word**: "daddy's home" triggers app activation
+- **Welcome Animation**: Full-screen animated greeting using Nebula branding
+- **Speech Framework**: Uses Apple's Speech Recognition for accurate detection
+- See [VOICE_ACTIVATION.md](VOICE_ACTIVATION.md) for detailed documentation
 
 ## Build Configuration
 
@@ -488,8 +494,18 @@ The app requires these permissions to function:
    - Required for AppleScript UI automation (clicking, typing, etc.)
    - Prompted only once on first launch
    - Subsequent launches check silently via `AXIsProcessTrusted()`
+
+3. **Microphone** (for voice activation)
+   - Required to listen for wake word "daddy's home"
+   - Requested on first launch
+   - System Settings → Privacy & Security → Microphone
+
+4. **Speech Recognition** (for voice command processing)
+   - Required to process voice commands using Apple's Speech framework
+   - Requested on first launch
+   - System Settings → Privacy & Security → Speech Recognition
    
-3. **Network access** (for Grok and Nebula API calls - automatic, no prompt)
+5. **Network access** (for Grok and Nebula API calls - automatic, no prompt)
 
 ### Permission Persistence
 **Because Debug builds have code signing disabled** and the build location is fixed:
