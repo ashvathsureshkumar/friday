@@ -8,6 +8,7 @@ import Cocoa
 final class EventMonitor {
     private var monitors: [Any] = []
     var onShortcut: ((String) -> Void)?
+    var onChatToggle: (() -> Void)?
 
     func start() {
         Logger.shared.log(.event, "EventMonitor starting...")
@@ -25,8 +26,10 @@ final class EventMonitor {
 
     private func handle(event: NSEvent) {
         if event.type == .keyDown {
-            if event.modifierFlags.contains(.command) && event.keyCode == 48 {
-                Logger.shared.log(.event, "Shortcut detected: Cmd+Tab (keyCode=48)")
+            // Cmd+Shift+K (keyCode 40 = 'k')
+            if event.modifierFlags.contains([.command, .shift]) && event.keyCode == 40 {
+                onChatToggle?()
+            } else if event.modifierFlags.contains(.command) && event.keyCode == 48 {
                 onShortcut?("cmd-tab")
             } else if event.modifierFlags.contains(.command) && event.keyCode == 49 {
                 Logger.shared.log(.event, "Shortcut detected: Cmd+Space (keyCode=49)")
