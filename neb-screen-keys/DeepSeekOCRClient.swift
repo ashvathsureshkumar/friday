@@ -41,8 +41,8 @@ final class DeepSeekOCRClient {
             return .failure(NSError(domain: "deepseek-ocr", code: -1, userInfo: [NSLocalizedDescriptionKey: "Missing HUGGINGFACE_API_KEY"]))
         }
         
-        // Hugging Face Inference API endpoint for DeepSeek-OCR
-        guard let url = URL(string: "https://api-inference.huggingface.co/models/deepseek-ai/DeepSeek-OCR") else {
+        // Hugging Face Inference API endpoint for DeepSeek-OCR (using new router endpoint)
+        guard let url = URL(string: "https://router.huggingface.co/hf-inference/models/deepseek-ai/DeepSeek-OCR") else {
             return .failure(NSError(domain: "deepseek-ocr", code: -1, userInfo: [NSLocalizedDescriptionKey: "Bad URL"]))
         }
         

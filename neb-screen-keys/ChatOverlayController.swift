@@ -39,6 +39,68 @@ struct ChatMessage {
     let content: String
 }
 
+struct ThinkingShimmerFactory {
+    struct Components {
+        let gradient: CAGradientLayer
+        let mask: CATextLayer
+        let animation: CABasicAnimation
+    }
+
+    static func make(
+        bounds: CGRect,
+        text: String,
+        font: NSFont,
+        baseColor: NSColor,
+        highlightColor: NSColor,
+        baseAlpha: CGFloat = 0.25,
+        highlightAlpha: CGFloat = 1.0,
+        duration: CFTimeInterval = 0.8
+    ) -> Components {
+        let gradient = CAGradientLayer()
+        gradient.frame = bounds
+        gradient.colors = [
+            baseColor.withAlphaComponent(baseAlpha).cgColor,
+            highlightColor.withAlphaComponent(highlightAlpha).cgColor,
+            baseColor.withAlphaComponent(baseAlpha).cgColor
+        ]
+        gradient.locations = [
+            NSNumber(value: -0.4),
+            NSNumber(value: -0.2),
+            NSNumber(value: 0.0)
+        ]
+        gradient.startPoint = CGPoint(x: 0, y: 0.5)
+        gradient.endPoint = CGPoint(x: 1, y: 0.5)
+
+        let mask = CATextLayer()
+        mask.frame = bounds
+        mask.string = text
+        mask.font = font
+        mask.fontSize = font.pointSize
+        mask.alignmentMode = .left
+        mask.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        mask.isWrapped = true
+        // Mask is returned to caller; not applied here so callers can reuse a separate mask for base fill.
+
+        let animation = CABasicAnimation(keyPath: "locations")
+        animation.fromValue = [
+            NSNumber(value: -0.4),
+            NSNumber(value: -0.2),
+            NSNumber(value: 0.0)
+        ]
+        animation.toValue = [
+            NSNumber(value: 1.0),
+            NSNumber(value: 1.2),
+            NSNumber(value: 1.4)
+        ]
+        animation.duration = duration
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        animation.isRemovedOnCompletion = false
+
+        return Components(gradient: gradient, mask: mask, animation: animation)
+    }
+}
+
 // Custom cell that vertically centers single-line text (placeholder) but aligns multiline to top
 class VerticallyCenteredTextFieldCell: NSTextFieldCell {
     override func drawingRect(forBounds rect: NSRect) -> NSRect {
@@ -64,6 +126,7 @@ final class ChatOverlayController: NSObject {
     private var inputContainer: NSView?
     private var messages: [ChatMessage] = []
     private var responseLabel: NSTextField?  // Simple text label for latest response
+    private var responseScrollView: NSScrollView?  // Scroll view for long responses
 
     // State
     private var inactivityTimer: Timer?
@@ -74,6 +137,8 @@ final class ChatOverlayController: NSObject {
     private var inputBlurView: NSVisualEffectView?
     private var glowAnimation: CABasicAnimation?
     private var messagesBorderView: NSView?  // Suspended border for messages area only
+    private var shimmerLayer: CAGradientLayer?
+    private var shimmerAnimation: CABasicAnimation?
 
     // Nebula colors
     private let accentColor = NSColor(red: 0x1d/255.0, green: 0x10/255.0, blue: 0xb3/255.0, alpha: 1.0)
@@ -81,6 +146,12 @@ final class ChatOverlayController: NSObject {
     private let glassBorder = NSColor.white.withAlphaComponent(0.1)
     private let messageUserBg = NSColor(red: 0x1d/255.0, green: 0x10/255.0, blue: 0xb3/255.0, alpha: 0.4)
     private let messageAssistantBg = NSColor.white.withAlphaComponent(0.08)
+    private let responseTextColor = NSColor.white.withAlphaComponent(0.95)
+    private let thinkingBaseFillColor = NSColor.white.withAlphaComponent(0.45)          // Gray base fill
+    private let thinkingGradientBaseColor = NSColor.white.withAlphaComponent(0.25)      // Subtle gray streak base
+    private let thinkingGradientHighlightColor = NSColor.white.withAlphaComponent(0.95) // Bright white streak
+    private let thinkingBaseTextColor = NSColor.white.withAlphaComponent(0.6)           // Visible gray text when idle
+    private var shimmerBaseLayer: CALayer?
 
     // Dimensions
     private let baseInputAreaHeight: CGFloat = 54  // Base input box height (one line)
@@ -131,8 +202,14 @@ final class ChatOverlayController: NSObject {
         // Show a "thinking" indicator initially
         messagesBlurView?.isHidden = false
         responseLabel?.stringValue = "Thinking..."
+        responseLabel?.textColor = thinkingBaseTextColor
 
         updatePanelHeight(animated: false)
+
+        // Start shimmer animation on "Thinking..." text after layout
+        DispatchQueue.main.async { [weak self] in
+            self?.startShimmerAnimation()
+        }
 
         positionTopRight()
         panel?.alphaValue = 1.0
@@ -153,6 +230,7 @@ final class ChatOverlayController: NSObject {
         inputEnabled = true
         inputBlurView?.isHidden = false
         glowView?.isHidden = false
+        stopShimmerAnimation()  // Stop shimmer since greeting has arrived
         startKeyboardCapture()
         updateInputDisplay()
         startGlowAnimation()
@@ -164,6 +242,7 @@ final class ChatOverlayController: NSObject {
         stopAllTimers()
         stopKeyboardCapture()
         stopGlowAnimation()
+        stopShimmerAnimation()
         panel?.orderOut(nil)
         // Reset state
         messages.removeAll()
@@ -180,11 +259,15 @@ final class ChatOverlayController: NSObject {
         // Response arrived - no longer waiting
         waitingForResponse = false
 
+        // Stop shimmer animation since we have actual content now
+        stopShimmerAnimation()
+
         // Show messages area
         messagesBlurView?.isHidden = false
 
         // Update the response label directly (no bubbles, just text)
         responseLabel?.stringValue = content
+        responseLabel?.textColor = responseTextColor
 
         updatePanelHeight(animated: true)
         resetInactivityTimer()
@@ -203,14 +286,27 @@ final class ChatOverlayController: NSObject {
             stopAllTimers()
             // Show "Thinking..." indicator
             responseLabel?.stringValue = "Thinking..."
+            responseLabel?.textColor = thinkingBaseTextColor
             updatePanelHeight(animated: true)
+            // Start shimmer animation after layout
+            DispatchQueue.main.async { [weak self] in
+                self?.startShimmerAnimation()
+            }
+        } else {
+            stopShimmerAnimation()
         }
     }
 
     private func calculateMessagesHeight() -> CGFloat {
+        let fullHeight = calculateFullTextHeight()
+        guard fullHeight > 0 else { return 0 }
+        return min(fullHeight + 24, maxMessagesHeight)  // Add padding, cap at max
+    }
+
+    private func calculateFullTextHeight() -> CGFloat {
         guard let label = responseLabel, !label.stringValue.isEmpty else { return 0 }
 
-        // Calculate height needed for the text
+        // Calculate height needed for the text (uncapped)
         let availableWidth = panelWidth - glowBorderWidth * 2 - 24  // Padding
         let font = NSFont.systemFont(ofSize: 14)
         let textStorage = NSTextStorage(string: label.stringValue)
@@ -224,9 +320,7 @@ final class ChatOverlayController: NSObject {
         textStorage.addLayoutManager(layoutManager)
 
         layoutManager.ensureLayout(for: textContainer)
-        let textHeight = layoutManager.usedRect(for: textContainer).height
-
-        return min(textHeight + 24, maxMessagesHeight)  // Add padding
+        return layoutManager.usedRect(for: textContainer).height
     }
 
     private func updatePanelHeight(animated: Bool) {
@@ -305,10 +399,16 @@ final class ChatOverlayController: NSObject {
                 width: panelWidth - glowBorderWidth * 2,
                 height: max(0, messagesHeight)
             )
-            // Update responseLabel frame to fill the blur view
-            if let label = responseLabel {
-                label.frame = messagesBlur.bounds.insetBy(dx: 12, dy: 12)
+            // Update scroll view and label frames
+            if let scrollView = responseScrollView, let label = responseLabel {
+                let scrollFrame = messagesBlur.bounds.insetBy(dx: 12, dy: 12)
+                scrollView.frame = scrollFrame
+
+                // Calculate the full height needed for the text
+                let fullTextHeight = calculateFullTextHeight()
+                label.frame = NSRect(x: 0, y: 0, width: scrollFrame.width, height: max(scrollFrame.height, fullTextHeight))
             }
+            updateShimmerLayoutIfNeeded()
         }
     }
 
@@ -365,18 +465,33 @@ final class ChatOverlayController: NSObject {
         messagesDarkOverlay.layer?.backgroundColor = spaceBackground.cgColor
         messagesBlur.addSubview(messagesDarkOverlay)
 
-        // Simple response label (no bubbles, just text filling the area)
+        // Scroll view for long responses
+        let respScrollView = NSScrollView(frame: messagesBlur.bounds.insetBy(dx: 12, dy: 12))
+        respScrollView.autoresizingMask = [.width, .height]
+        respScrollView.hasVerticalScroller = true
+        respScrollView.hasHorizontalScroller = false
+        respScrollView.autohidesScrollers = true
+        respScrollView.borderType = .noBorder
+        respScrollView.drawsBackground = false
+        respScrollView.backgroundColor = .clear
+        respScrollView.scrollerStyle = .overlay
+        respScrollView.contentView.drawsBackground = false
+
+        // Response text view (supports scrolling for long content)
         let respLabel = NSTextField(wrappingLabelWithString: "")
-        respLabel.frame = messagesBlur.bounds.insetBy(dx: 12, dy: 12)
-        respLabel.autoresizingMask = [.width, .height]
+        respLabel.frame = NSRect(x: 0, y: 0, width: respScrollView.contentSize.width, height: 0)
+        respLabel.autoresizingMask = [.width]
         respLabel.isEditable = false
         respLabel.isSelectable = true
         respLabel.drawsBackground = false
-        respLabel.textColor = .white.withAlphaComponent(0.95)
+        respLabel.textColor = responseTextColor
         respLabel.font = NSFont.systemFont(ofSize: 14)
         respLabel.lineBreakMode = .byWordWrapping
         respLabel.maximumNumberOfLines = 0
-        messagesBlur.addSubview(respLabel)
+
+        respScrollView.documentView = respLabel
+        messagesBlur.addSubview(respScrollView)
+        self.responseScrollView = respScrollView
         self.responseLabel = respLabel
 
         self.messagesBlurView = messagesBlur
@@ -480,8 +595,8 @@ final class ChatOverlayController: NSObject {
 
     private func startFadeOut() {
         // Pulse fade animation - fade in/out a few times before hiding
-        let pulseDuration: TimeInterval = 0.6
-        let pulseCount = 3
+        let pulseDuration: TimeInterval = 1.0
+        let pulseCount = 5
         var currentPulse = 0
 
         func doPulse() {
@@ -802,6 +917,99 @@ final class ChatOverlayController: NSObject {
     private func stopGlowAnimation() {
         glowView?.removeFromSuperview()
         glowView = nil
+    }
+
+    // MARK: - Shimmer Animation for "Thinking..."
+
+    private func startShimmerAnimation() {
+        guard let label = responseLabel, !label.stringValue.isEmpty else { return }
+        stopShimmerAnimation()
+
+        label.textColor = .clear  // Only the masked layers should be visible during shimmer
+        label.layoutSubtreeIfNeeded()
+        label.wantsLayer = true
+
+        let font = label.font ?? NSFont.systemFont(ofSize: 14)
+        let components = ThinkingShimmerFactory.make(
+            bounds: label.bounds,
+            text: label.stringValue,
+            font: font,
+            baseColor: thinkingGradientBaseColor,
+            highlightColor: thinkingGradientHighlightColor
+        )
+
+        // Base dim fill (keeps a single text baseline, avoids double rendering)
+        let baseMask = makeTextMask(for: label)
+        let baseLayer = CALayer()
+        baseLayer.frame = label.bounds
+        baseLayer.backgroundColor = thinkingBaseFillColor.cgColor
+        baseLayer.mask = baseMask
+        label.layer?.addSublayer(baseLayer)
+        shimmerBaseLayer = baseLayer
+
+        // Shimmer streak
+        let shimmerMask = makeTextMask(for: label)
+        components.gradient.mask = shimmerMask
+        label.layer?.addSublayer(components.gradient)
+        components.gradient.add(components.animation, forKey: "shimmer")
+
+        shimmerLayer = components.gradient
+        shimmerAnimation = components.animation
+    }
+
+    private func stopShimmerAnimation() {
+        shimmerBaseLayer?.mask = nil
+        shimmerBaseLayer?.removeFromSuperlayer()
+        shimmerBaseLayer = nil
+        shimmerLayer?.removeAllAnimations()
+        shimmerLayer?.mask = nil
+        shimmerLayer?.removeFromSuperlayer()
+        shimmerLayer = nil
+        shimmerAnimation = nil
+
+        // Remove the mask
+        responseLabel?.layer?.mask = nil
+
+        // Restore visible text color based on current content
+        if responseLabel?.stringValue == "Thinking..." {
+            responseLabel?.textColor = thinkingBaseTextColor
+        } else {
+            responseLabel?.textColor = responseTextColor
+        }
+    }
+
+    private func updateShimmerLayoutIfNeeded() {
+        guard let label = responseLabel else { return }
+        if let gradient = shimmerLayer {
+            gradient.frame = label.bounds
+            gradient.mask?.frame = label.bounds
+            if let textMask = gradient.mask as? CATextLayer {
+                textMask.string = label.stringValue
+                textMask.font = label.font
+                textMask.fontSize = label.font?.pointSize ?? textMask.fontSize
+            }
+        }
+        if let base = shimmerBaseLayer {
+            base.frame = label.bounds
+            base.mask?.frame = label.bounds
+            if let textMask = base.mask as? CATextLayer {
+                textMask.string = label.stringValue
+                textMask.font = label.font
+                textMask.fontSize = label.font?.pointSize ?? textMask.fontSize
+            }
+        }
+    }
+
+    private func makeTextMask(for label: NSTextField) -> CATextLayer {
+        let textLayer = CATextLayer()
+        textLayer.frame = label.bounds
+        textLayer.string = label.stringValue
+        textLayer.font = label.font
+        textLayer.fontSize = label.font?.pointSize ?? 14
+        textLayer.alignmentMode = .left
+        textLayer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        textLayer.isWrapped = true
+        return textLayer
     }
 
     // MARK: - Messages

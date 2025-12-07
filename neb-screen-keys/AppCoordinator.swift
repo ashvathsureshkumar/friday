@@ -30,8 +30,8 @@ final class AppCoordinator {
     private var pendingAppleScript: String?
     private var isActivated = false  // Track if voice activation has occurred
 
-    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=") {
+    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "") {
 
         let trimmedCollectionId = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines)
         let providedCollectionId = (trimmedCollectionId?.isEmpty == false) ? trimmedCollectionId : nil
@@ -371,7 +371,7 @@ final class AppCoordinator {
 
             // Capture full screen in background
             await MainActor.run { self.debugLog("Capturing full screen for greeting...") }
-            let frame = await self.captureService.captureFullScreen()
+            let frame = await self.captureService.captureActiveScreen()
             await MainActor.run { self.debugLog("Full screen capture done: \(frame != nil ? "success" : "nil")") }
 
             // Build proactive message with screen context
@@ -454,7 +454,7 @@ final class AppCoordinator {
             await MainActor.run { self.debugLog("Starting parallel: screen capture + Nebula search...") }
 
             // Start both operations concurrently
-            async let screenCaptureTask = self.captureService.captureFullScreen()
+            async let screenCaptureTask = self.captureService.captureActiveScreen()
             async let nebulaSearchTask = self.searchNebulaAsync(query: message)
 
             // Wait for both to complete
@@ -723,9 +723,30 @@ final class AppCoordinator {
             return nil
         }
 
-        // Try different response formats
-        var results: [[String: Any]]?
+        // New format: {"results": {"query": "...", "entities": [...]}}
+        if let resultsObj = json["results"] as? [String: Any],
+           let entities = resultsObj["entities"] as? [[String: Any]] {
+            return entities.compactMap { entity -> String? in
+                let entityName = entity["entity_name"] as? String ?? "Unknown"
+                let category = entity["entity_category"] as? String ?? ""
+                let score = entity["activation_score"] as? Double ?? 0
 
+                // Extract description from nested profile.entity.description
+                var description = ""
+                if let profile = entity["profile"] as? [String: Any],
+                   let entityDetails = profile["entity"] as? [String: Any],
+                   let desc = entityDetails["description"] as? String {
+                    description = desc
+                }
+
+                if description.isEmpty { return nil }
+
+                return "[\(entityName) (\(category), score: \(String(format: "%.2f", score)))]\n\(description)"
+            }
+        }
+
+        // Legacy format fallback
+        var results: [[String: Any]]?
         if let r = json["results"] as? [[String: Any]] {
             results = r
         } else if let memories = json["memories"] as? [[String: Any]] {
@@ -852,37 +873,59 @@ final class AppCoordinator {
         return nil
     }
     
-    /// Create a new Nebula collection on app launch
-    /// Creates a new collection with a dynamically generated UUID (doesn't delete old collections)
+    /// Setup Nebula collection - reuse persisted collection or create new one
     /// Calls completion when done (true = success, false = had errors but continuing)
     private func setupNebulaCollection(completion: @escaping (Bool) -> Void) {
-        Logger.shared.log(.nebula, "Creating new Nebula collection...")
-        
-        // Generate a unique name with timestamp to avoid conflicts
-        let uniqueName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970))"
-        
-        nebula.createCollection(name: uniqueName) { [weak self] createResult in
+        // Check if we already have a persisted collection ID
+        if let persistedId = UserDefaults.standard.string(forKey: AppCoordinator.nebulaCollectionDefaultsKey),
+           !persistedId.isEmpty {
+            Logger.shared.log(.nebula, "Using persisted collection ID: \(persistedId)")
+            nebula.setCollectionId(persistedId)
+            Logger.shared.log(.nebula, "✅ Collection ready for use (persisted)")
+            completion(true)
+            return
+        }
+
+        // Also check if provided via environment variable
+        if let providedId = providedNebulaCollectionId {
+            Logger.shared.log(.nebula, "Using provided collection ID: \(providedId)")
+            nebula.setCollectionId(providedId)
+            // Persist it for future runs
+            UserDefaults.standard.set(providedId, forKey: AppCoordinator.nebulaCollectionDefaultsKey)
+            Logger.shared.log(.nebula, "✅ Collection ready for use (provided, now persisted)")
+            completion(true)
+            return
+        }
+
+        // No persisted or provided ID - create a new collection
+        Logger.shared.log(.nebula, "No persisted collection found, creating new one...")
+
+        // Use a stable name (not timestamp-based) so we can find it again
+        let collectionName = "neb-screen-keys"
+
+        nebula.createCollection(name: collectionName) { [weak self] createResult in
             guard let self = self else {
                 completion(false)
                 return
             }
-            
+
             switch createResult {
             case .success(let newCollectionId):
-                Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
+                Logger.shared.log(.nebula, "✅ New collection created with ID: \(newCollectionId)")
                 self.nebula.setCollectionId(newCollectionId)
-                Logger.shared.log(.nebula, "✅ Collection ready for use")
+                // Persist for future runs
+                UserDefaults.standard.set(newCollectionId, forKey: AppCoordinator.nebulaCollectionDefaultsKey)
+                Logger.shared.log(.nebula, "✅ Collection ID persisted to UserDefaults")
                 completion(true)
-                
+
             case .failure(let error):
                 let errorString = error.localizedDescription
-                Logger.shared.log(.nebula, "❌ Failed to create new collection: \(errorString)")
-                
-                // If 409 (already exists), try again with different name
+                Logger.shared.log(.nebula, "❌ Failed to create collection: \(errorString)")
+
+                // If 409 (already exists), try with timestamp suffix
                 if errorString.contains("409") || errorString.contains("already exists") {
-                    Logger.shared.log(.nebula, "🔄 Collection name conflict, retrying with new timestamp...")
-                    // Retry once with a slightly different timestamp
-                    let retryName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970) + 1)"
+                    Logger.shared.log(.nebula, "🔄 Collection name conflict, retrying with timestamp...")
+                    let retryName = "neb-screen-keys-\(Int(Date().timeIntervalSince1970))"
                     self.nebula.createCollection(name: retryName) { [weak self] retryResult in
                         guard let self = self else {
                             completion(false)
@@ -890,17 +933,19 @@ final class AppCoordinator {
                         }
                         switch retryResult {
                         case .success(let newCollectionId):
-                            Logger.shared.log(.nebula, "✅ New collection created with dynamic ID: \(newCollectionId)")
+                            Logger.shared.log(.nebula, "✅ New collection created with ID: \(newCollectionId)")
                             self.nebula.setCollectionId(newCollectionId)
-                            Logger.shared.log(.nebula, "✅ Collection ready for use")
+                            // Persist for future runs
+                            UserDefaults.standard.set(newCollectionId, forKey: AppCoordinator.nebulaCollectionDefaultsKey)
+                            Logger.shared.log(.nebula, "✅ Collection ID persisted to UserDefaults")
                             completion(true)
                         case .failure:
-                            Logger.shared.log(.nebula, "⚠️ Collection creation failed after retry, but continuing anyway")
+                            Logger.shared.log(.nebula, "⚠️ Collection creation failed after retry, continuing anyway")
                             completion(false)
                         }
                     }
                 } else {
-                    Logger.shared.log(.nebula, "⚠️ Collection creation failed, but continuing anyway")
+                    Logger.shared.log(.nebula, "⚠️ Collection creation failed, continuing anyway")
                     completion(false)
                 }
             }

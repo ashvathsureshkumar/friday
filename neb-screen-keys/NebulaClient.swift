@@ -23,15 +23,42 @@ struct NebulaMemoryRequest: Codable {
 }
 
 /// Request structure for searching memories in Nebula
+/// Uses the /v1/retrieval/search endpoint with search_settings
 struct NebulaSearchRequest: Codable {
     let query: String
-    let collection_ids: [String]    // Array of collection IDs to search
-    let limit: Int
-    
-    enum CodingKeys: String, CodingKey {
-        case query
-        case collection_ids
-        case limit
+    let search_mode: String
+    let search_settings: SearchSettings
+
+    struct SearchSettings: Codable {
+        let limit: Int
+        let semantic_weight: Double
+        let fulltext_weight: Double
+        let filters: SearchFilters
+    }
+
+    struct SearchFilters: Codable {
+        let collection_ids: CollectionFilter
+    }
+
+    struct CollectionFilter: Codable {
+        let overlap: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case overlap = "$overlap"
+        }
+    }
+
+    init(query: String, collectionIds: [String], limit: Int = 5) {
+        self.query = query
+        self.search_mode = "super"
+        self.search_settings = SearchSettings(
+            limit: limit,
+            semantic_weight: 5.0,
+            fulltext_weight: 1.0,
+            filters: SearchFilters(
+                collection_ids: CollectionFilter(overlap: collectionIds)
+            )
+        )
     }
 }
 
@@ -47,23 +74,41 @@ struct NebulaMemoryResponse: Codable {
 }
 
 /// Response structure for memory search results
+/// New format: {"results": {"query": "...", "entities": [...]}}
 struct NebulaSearchResponse: Codable {
-    let results: [NebulaSearchResult]?
-    
-    struct NebulaSearchResult: Codable {
-        let id: String?
-        let memory_id: String?
-        let content: String?
-        let metadata: [String: String]?
-        let score: Double?
-        
-        enum CodingKeys: String, CodingKey {
-            case id
-            case memory_id
-            case content
-            case metadata
-            case score
-        }
+    let results: SearchResults?
+
+    struct SearchResults: Codable {
+        let query: String?
+        let entities: [Entity]?
+    }
+
+    struct Entity: Codable {
+        let entity_id: String?
+        let entity_name: String?
+        let entity_category: String?
+        let activation_score: Double?
+        let profile: EntityProfile?
+    }
+
+    struct EntityProfile: Codable {
+        let entity: EntityDetails?
+    }
+
+    struct EntityDetails: Codable {
+        let name: String?
+        let description: String?
+    }
+
+    /// Helper to extract memory content from entities
+    func getMemoryContent() -> String {
+        guard let entities = results?.entities else { return "" }
+        return entities.compactMap { entity -> String? in
+            if let desc = entity.profile?.entity?.description, !desc.isEmpty {
+                return "[\(entity.entity_name ?? "Unknown")]: \(desc)"
+            }
+            return nil
+        }.joined(separator: "\n\n")
     }
 }
 
@@ -162,12 +207,13 @@ final class NebulaClient {
     }
 
     func searchMemories(query: String, limit: Int = 5, completion: @escaping (Result<Data, Error>) -> Void) {
-        Logger.shared.log(.nebula, "Searching memories: query='\(query)', limit=\(limit)")
-        
+        Logger.shared.log(.nebula, "Searching memories: query='\(query)', limit=\(limit), collection=\(collectionId)")
+
         // Create properly structured search request per Nebula API docs
+        // Uses /v1/retrieval/search with search_settings and filters
         let request = NebulaSearchRequest(
             query: query,
-            collection_ids: [collectionId],    // Server expects array of collection IDs
+            collectionIds: [collectionId],
             limit: limit
         )
         
@@ -287,8 +333,9 @@ final class NebulaClient {
     }
     
     // POST to search endpoint using proper Codable struct
+    // Note: Nebula API uses /v1/retrieval/search for semantic search
     private func postToSearch(request: NebulaSearchRequest, completion: @escaping (Result<Data, Error>) -> Void) {
-        let searchURL = baseURL.appendingPathComponent("v1/search")
+        let searchURL = baseURL.appendingPathComponent("v1/retrieval/search")
         var urlRequest = URLRequest(url: searchURL)
         urlRequest.httpMethod = "POST"
         urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -299,6 +346,11 @@ final class NebulaClient {
         do {
             let encoder = JSONEncoder()
             urlRequest.httpBody = try encoder.encode(request)
+
+            // Log the request body for debugging
+            if let jsonString = String(data: urlRequest.httpBody!, encoding: .utf8) {
+                Logger.shared.log(.nebula, "Search request body: \(jsonString)")
+            }
         } catch {
             Logger.shared.log(.nebula, "Encoding error: \(error.localizedDescription)")
             completion(.failure(error))

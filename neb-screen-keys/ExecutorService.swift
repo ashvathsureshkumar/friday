@@ -90,17 +90,17 @@ final class ExecutorService {
                 if let retrieved = String(data: data, encoding: .utf8), !retrieved.isEmpty {
                     Logger.shared.log(.executor, "Retrieved memories: \(retrieved.count) chars")
                     memoriesText = retrieved
-                    
-                    // Extract memory IDs for deletion after execution
+
+                    // Extract entity IDs for tracking (new format uses entities)
                     do {
                         let searchResponse = try JSONDecoder().decode(NebulaSearchResponse.self, from: data)
-                        if let results = searchResponse.results {
-                            for result in results {
-                                if let memId = result.memory_id ?? result.id {
-                                    memoryIdsToDelete.append(memId)
+                        if let entities = searchResponse.results?.entities {
+                            for entity in entities {
+                                if let entityId = entity.entity_id {
+                                    memoryIdsToDelete.append(entityId)
                                 }
                             }
-                            Logger.shared.log(.executor, "Tracked \(memoryIdsToDelete.count) memory IDs for cleanup")
+                            Logger.shared.log(.executor, "Tracked \(memoryIdsToDelete.count) entity IDs")
                         }
                     } catch {
                         Logger.shared.log(.executor, "Failed to parse search response for IDs: \(error)")
