@@ -12,14 +12,22 @@ final class ScreenCaptureService {
     private let captureQueue = DispatchQueue(label: "screen-capture.queue")
 
     func captureActiveScreen() async -> ScreenFrame? {
-        guard #available(macOS 14.0, *) else { return nil }
+        Logger.shared.log(.capture, "🎬 captureActiveScreen() called")
+        guard #available(macOS 14.0, *) else {
+            Logger.shared.log(.capture, "❌ macOS version < 14.0, capture not available")
+            return nil
+        }
+        Logger.shared.log(.capture, "✅ macOS 14.0+, proceeding with capture...")
         return await captureWithScreenCaptureKit()
     }
 
     @available(macOS 14.0, *)
     private func captureWithScreenCaptureKit() async -> ScreenFrame? {
+        Logger.shared.log(.capture, "🔧 captureWithScreenCaptureKit() starting...")
         do {
+            Logger.shared.log(.capture, "📡 Requesting SCShareableContent...")
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            Logger.shared.log(.capture, "✅ SCShareableContent received: \(content.displays.count) displays, \(content.windows.count) windows")
             
             // Find the active window (frontmost application's main window)
             if let activeWindow = findActiveWindow(from: content) {
@@ -36,7 +44,8 @@ final class ScreenCaptureService {
             
             return await captureMainDisplay(mainDisplay, from: content)
         } catch {
-            Logger.shared.log("ScreenCaptureKit error: \(error)")
+            Logger.shared.log(.capture, "❌ ScreenCaptureKit error: \(error.localizedDescription)")
+            Logger.shared.log(.capture, "   Error details: \(error)")
             return nil
         }
     }

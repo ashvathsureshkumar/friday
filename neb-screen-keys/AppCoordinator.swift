@@ -97,8 +97,12 @@ final class AppCoordinator {
             // CONSUMER B: Start Execution Agent consumer (triggers UI for new tasks)
             self.startExecutionAgentConsumer()
 
-            // Initial screen capture on launch
-            self.captureAndBuffer(reason: "launch")
+            // Initial screen capture on launch (with delay to ensure permissions are processed)
+            Logger.shared.log(.capture, "Scheduling initial capture on launch...")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                Logger.shared.log(.capture, "Executing initial capture on launch...")
+                self?.captureAndBuffer(reason: "launch")
+            }
         }
     }
 
@@ -124,31 +128,39 @@ final class AppCoordinator {
 
     /// Capture screen and buffer it (with throttling)
     private func captureAndBuffer(reason: String) {
+        Logger.shared.log(.capture, "🔍 captureAndBuffer called with reason: \(reason)")
+        
         // Throttle screen captures to avoid performance hits
         let now = Date()
         if let lastCapture = lastScreenCaptureTime,
            now.timeIntervalSince(lastCapture) < screenCaptureThrottleInterval {
             // Skip this capture, too soon
-            Logger.shared.log(.capture, "Capture skipped (throttled). Reason: \(reason)")
+            Logger.shared.log(.capture, "⏭️ Capture skipped (throttled). Reason: \(reason), lastCapture: \(lastCapture.timeIntervalSinceNow) seconds ago")
             return
         }
 
         lastScreenCaptureTime = now
-        Logger.shared.log(.capture, "Initiating screen capture. Reason: \(reason)")
+        Logger.shared.log(.capture, "🚀 Initiating screen capture. Reason: \(reason)")
 
         Task { [weak self] in
-            guard let self = self else { return }
-            Logger.shared.log(.capture, "Starting async capture task...")
-            if let frame = await self.captureService.captureActiveScreen() {
+            guard let self = self else {
+                Logger.shared.log(.capture, "❌ Self is nil in capture task")
+                return
+            }
+            Logger.shared.log(.capture, "▶️ Starting async capture task...")
+            
+            let frame = await self.captureService.captureActiveScreen()
+            
+            if let frame = frame {
                 Logger.shared.log(.capture, "✅ Screen capture succeeded, storing in buffer...")
                 await self.contextBuffer.updateLatestScreen(frame)
                 Logger.shared.log(.capture, "✅ Screen captured and buffered (\(reason))")
                 
                 // Debug: Check buffer state after storing
                 let stats = await self.contextBuffer.getStats()
-                Logger.shared.log(.capture, "📊 Buffer stats: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen)")
+                Logger.shared.log(.capture, "📊 Buffer stats after capture: keystrokes=\(stats.keystrokeCount), hasScreen=\(stats.hasScreen)")
             } else {
-                Logger.shared.log(.capture, "❌ Screen capture failed (\(reason))")
+                Logger.shared.log(.capture, "❌ Screen capture returned nil (\(reason))")
             }
         }
     }
