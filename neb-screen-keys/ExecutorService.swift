@@ -42,7 +42,7 @@ final class ExecutorService {
         
         let request = ChatRequest(
             messages: [ChatMessage(role: "user", content: [.text(previewPrompt)])],
-            model: "grok-beta",
+            model: "grok-4-fast",  // Using Grok 4 Fast for quick suggestions
             stream: false,
             temperature: 0.7
         )
@@ -104,7 +104,7 @@ final class ExecutorService {
             
             let request = ChatRequest(
                 messages: [ChatMessage(role: "user", content: [.text(planPrompt)])],
-                model: "grok-beta",
+                model: "grok-4-fast",  // Using Grok 4 Fast for execution planning
                 stream: false,
                 temperature: 0.7
             )

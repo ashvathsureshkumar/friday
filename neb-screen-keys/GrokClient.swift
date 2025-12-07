@@ -101,29 +101,33 @@ final class GrokClient {
             let jsonData = try encoder.encode(payload)
             request.httpBody = jsonData
 
-            // Debug logging: show the outgoing payload
-            if let jsonString = String(data: jsonData, encoding: .utf8) {
-                Logger.shared.log(.annotator, "📤 Outgoing API Payload:\n\(jsonString)")
+            // Log summary without the massive base64 image
+            let hasImage = payload.messages.contains { message in
+                message.content.contains { part in
+                    if case .imageUrl = part { return true }
+                    return false
+                }
             }
+            Logger.shared.log(.annotator, "Sending Grok request: model=\(payload.model), messages=\(payload.messages.count), hasImage=\(hasImage), size=\(jsonData.count / 1024)KB")
         } catch {
-            Logger.shared.log(.annotator, "❌ Failed to encode request: \(error.localizedDescription)")
+            Logger.shared.log(.annotator, "Failed to encode request: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
 
         session.dataTask(with: request) { data, response, error in
             if let error = error {
-                Logger.shared.log(.annotator, "❌ Network error: \(error.localizedDescription)")
+                Logger.shared.log(.annotator, "Network error: \(error.localizedDescription)")
                 completion(.failure(error))
                 return
             }
 
             if let httpResponse = response as? HTTPURLResponse {
-                Logger.shared.log(.annotator, "📥 API Response Status: \(httpResponse.statusCode)")
+                Logger.shared.log(.annotator, "API Response Status: \(httpResponse.statusCode)")
 
                 if httpResponse.statusCode != 200 {
                     if let data = data, let errorBody = String(data: data, encoding: .utf8) {
-                        Logger.shared.log(.annotator, "❌ API Error Response: \(errorBody)")
+                        Logger.shared.log(.annotator, "API Error Response: \(errorBody)")
                     }
                 }
             }

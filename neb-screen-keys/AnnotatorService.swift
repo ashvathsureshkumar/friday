@@ -65,7 +65,7 @@ final class AnnotatorService {
                     .imageUrl(ImageUrl(url: imageDataUrl))
                 ])
             ],
-            model: "grok-2-vision-1212",  // Vision-capable model
+            model: "grok-4-fast",  // Fast Grok 4 model
             stream: false,
             temperature: 0.7
         )
