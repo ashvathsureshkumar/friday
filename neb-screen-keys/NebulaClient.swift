@@ -5,6 +5,49 @@
 
 import Foundation
 
+// MARK: - Nebula API Request/Response Structures
+
+/// Request structure for storing a memory in Nebula
+struct NebulaMemoryRequest: Codable {
+    let content: String
+    let metadata: [String: String]
+    let collection_ref: String      // Server expects "collection_ref" not "collection_id"
+    let engram_type: String         // Required field for memory type
+    
+    enum CodingKeys: String, CodingKey {
+        case content
+        case metadata
+        case collection_ref
+        case engram_type
+    }
+}
+
+/// Request structure for searching memories in Nebula
+struct NebulaSearchRequest: Codable {
+    let query: String
+    let collection_ids: [String]    // Array of collection IDs to search
+    let limit: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case query
+        case collection_ids
+        case limit
+    }
+}
+
+/// Response structure for stored memory
+struct NebulaMemoryResponse: Codable {
+    let id: String?
+    let memory_id: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case memory_id
+    }
+}
+
+// MARK: - Nebula Client
+
 final class NebulaClient {
     private let apiKey: String
     private let collectionId: String
@@ -30,18 +73,32 @@ final class NebulaClient {
         let contentPreview = content.count > 100 ? String(content.prefix(100)) + "..." : content
         Logger.shared.log(.nebula, "Adding memory: \(contentPreview)")
         
-        // Using Nebula's Python SDK as reference: https://docs.trynebula.ai/clients/python
-        // The store_memory method requires collection_id, content, and metadata
-        let body: [String: Any] = [
-            "collection_id": collectionId,
-            "content": content,
-            "metadata": metadata
-        ]
+        // Convert metadata to [String: String] for Codable compliance
+        // Nebula expects string values, so convert any non-string values to strings
+        let stringMetadata = metadata.mapValues { value -> String in
+            if let stringValue = value as? String {
+                return stringValue
+            } else if let numberValue = value as? NSNumber {
+                return numberValue.stringValue
+            } else if let boolValue = value as? Bool {
+                return boolValue ? "true" : "false"
+            } else {
+                return String(describing: value)
+            }
+        }
         
-        // Log summary, not full payload (can be huge)
-        Logger.shared.log(.nebula, "Method: store_memory, Content: \(content.count) chars, Metadata keys: \(metadata.keys.joined(separator: ", "))")
+        // Create properly structured request per Nebula API docs
+        let request = NebulaMemoryRequest(
+            content: content,
+            metadata: stringMetadata,
+            collection_ref: collectionId,      // Use collection_ref as server expects
+            engram_type: "document"            // Valid types: "conversation" or "document"
+        )
         
-        postToStoreMemory(body: body) { result in
+        // Log summary
+        Logger.shared.log(.nebula, "Storing: content=\(content.count)chars, metadata=\(stringMetadata.keys.count)keys, type=document")
+        
+        postToStoreMemory(request: request) { result in
             switch result {
             case .success(let data):
                 // Log the response (but limit length)
@@ -50,22 +107,24 @@ final class NebulaClient {
                     Logger.shared.log(.nebula, "Response: \(preview)")
                 }
                 
-                // Parse response to check for success
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    // Check if we got a memory_id back (indicates success)
-                    if json["memory_id"] != nil || json["id"] != nil {
-                        Logger.shared.log(.nebula, "Memory stored successfully")
+                // Try to parse response
+                do {
+                    let response = try JSONDecoder().decode(NebulaMemoryResponse.self, from: data)
+                    if response.id != nil || response.memory_id != nil {
+                        Logger.shared.log(.nebula, "Memory stored successfully (id: \(response.id ?? response.memory_id ?? "unknown"))")
                         completion(.success(()))
-                        return
+                    } else {
+                        Logger.shared.log(.nebula, "Memory stored (no ID returned)")
+                        completion(.success(()))
                     }
+                } catch {
+                    // If we got 200/201 but can't parse, still consider it success
+                    Logger.shared.log(.nebula, "Memory stored (parse error: \(error.localizedDescription))")
+                    completion(.success(()))
                 }
                 
-                // If we got a 200 response but unexpected format, still consider it success
-                Logger.shared.log(.nebula, "Memory stored (response format may vary)")
-                completion(.success(()))
-                
             case .failure(let error):
-                Logger.shared.log(.nebula, "Network error: \(error.localizedDescription)")
+                Logger.shared.log(.nebula, "Store memory failed: \(error.localizedDescription)")
                 completion(.failure(error))
             }
         }
@@ -74,15 +133,14 @@ final class NebulaClient {
     func searchMemories(query: String, limit: Int = 5, completion: @escaping (Result<Data, Error>) -> Void) {
         Logger.shared.log(.nebula, "Searching memories: query='\(query)', limit=\(limit)")
         
-        // Using Nebula's Python SDK as reference: https://docs.trynebula.ai/clients/python
-        // The search method requires query, collection_ids (array), and limit
-        let body: [String: Any] = [
-            "query": query,
-            "collection_ids": [collectionId],  // Array of collection IDs
-            "limit": limit
-        ]
+        // Create properly structured search request per Nebula API docs
+        let request = NebulaSearchRequest(
+            query: query,
+            collection_ids: [collectionId],    // Server expects array of collection IDs
+            limit: limit
+        )
         
-        postToSearch(body: body) { result in
+        postToSearch(request: request) { result in
             switch result {
             case .success(let data):
                 if let responseString = String(data: data, encoding: .utf8) {
@@ -97,26 +155,31 @@ final class NebulaClient {
         }
     }
 
-    // POST to store_memory endpoint (using correct Nebula base URL)
-    private func postToStoreMemory(body: [String: Any], completion: @escaping (Result<Data, Error>) -> Void) {
+    // POST to store_memory endpoint using proper Codable struct
+    private func postToStoreMemory(request: NebulaMemoryRequest, completion: @escaping (Result<Data, Error>) -> Void) {
         let storeURL = baseURL.appendingPathComponent("v1/memories")
-        var request = URLRequest(url: storeURL)
-        request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var urlRequest = URLRequest(url: storeURL)
+        urlRequest.httpMethod = "POST"
+        urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         
         Logger.shared.log(.nebula, "POST \(storeURL.absoluteString)")
-        Logger.shared.log(.nebula, "Auth: Bearer \(apiKey.prefix(15))...")
 
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+            let encoder = JSONEncoder()
+            urlRequest.httpBody = try encoder.encode(request)
+            
+            // Log the actual JSON being sent for debugging
+            if let jsonString = String(data: urlRequest.httpBody!, encoding: .utf8) {
+                Logger.shared.log(.nebula, "Request body: \(jsonString)")
+            }
         } catch {
-            Logger.shared.log(.nebula, "Serialization error: \(error.localizedDescription)")
+            Logger.shared.log(.nebula, "Encoding error: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
 
-        session.dataTask(with: request) { data, response, error in
+        session.dataTask(with: urlRequest) { data, response, error in
             if let error = error {
                 Logger.shared.log(.nebula, "Request failed: \(error.localizedDescription)")
                 completion(.failure(error))
@@ -129,8 +192,8 @@ final class NebulaClient {
                 // Accept 200 and 201 as success
                 if httpResponse.statusCode != 200 && httpResponse.statusCode != 201 {
                     if let data = data, let errorBody = String(data: data, encoding: .utf8) {
-                        let preview = errorBody.count > 200 ? String(errorBody.prefix(200)) + "..." : errorBody
-                        Logger.shared.log(.nebula, "Error body: \(preview)")
+                        let preview = errorBody.count > 300 ? String(errorBody.prefix(300)) + "..." : errorBody
+                        Logger.shared.log(.nebula, "Error (\(httpResponse.statusCode)): \(preview)")
                         
                         let error = NSError(domain: "nebula", 
                                           code: httpResponse.statusCode,
@@ -145,26 +208,26 @@ final class NebulaClient {
         }.resume()
     }
     
-    // POST to search endpoint (using correct Nebula base URL)
-    private func postToSearch(body: [String: Any], completion: @escaping (Result<Data, Error>) -> Void) {
+    // POST to search endpoint using proper Codable struct
+    private func postToSearch(request: NebulaSearchRequest, completion: @escaping (Result<Data, Error>) -> Void) {
         let searchURL = baseURL.appendingPathComponent("v1/search")
-        var request = URLRequest(url: searchURL)
-        request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        var urlRequest = URLRequest(url: searchURL)
+        urlRequest.httpMethod = "POST"
+        urlRequest.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         
         Logger.shared.log(.nebula, "POST \(searchURL.absoluteString)")
-        Logger.shared.log(.nebula, "Auth: Bearer \(apiKey.prefix(15))...")
 
         do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+            let encoder = JSONEncoder()
+            urlRequest.httpBody = try encoder.encode(request)
         } catch {
-            Logger.shared.log(.nebula, "Serialization error: \(error.localizedDescription)")
+            Logger.shared.log(.nebula, "Encoding error: \(error.localizedDescription)")
             completion(.failure(error))
             return
         }
 
-        session.dataTask(with: request) { data, response, error in
+        session.dataTask(with: urlRequest) { data, response, error in
             if let error = error {
                 Logger.shared.log(.nebula, "Request failed: \(error.localizedDescription)")
                 completion(.failure(error))
@@ -174,11 +237,10 @@ final class NebulaClient {
             if let httpResponse = response as? HTTPURLResponse {
                 Logger.shared.log(.nebula, "HTTP \(httpResponse.statusCode)")
                 
-                // Treat non-200 as failure
                 if httpResponse.statusCode != 200 {
                     if let data = data, let errorBody = String(data: data, encoding: .utf8) {
-                        let preview = errorBody.count > 200 ? String(errorBody.prefix(200)) + "..." : errorBody
-                        Logger.shared.log(.nebula, "Error body: \(preview)")
+                        let preview = errorBody.count > 300 ? String(errorBody.prefix(300)) + "..." : errorBody
+                        Logger.shared.log(.nebula, "Error (\(httpResponse.statusCode)): \(preview)")
                         
                         let error = NSError(domain: "nebula", 
                                           code: httpResponse.statusCode,
