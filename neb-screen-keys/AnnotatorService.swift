@@ -58,16 +58,16 @@ final class AnnotatorService {
         let prompt = buildPromptWithKeystrokes(frame: frame, keystrokes: batch.keystrokes)
 
         // Build OpenAI-compatible chat request with vision
-        let request = ChatRequest(
+        let request = GrokRequest(
+            model: "grok-4-fast",  // Fast Grok 4 model
             messages: [
-                ChatMessage(role: "user", content: [
-                    .text(prompt),
-                    .imageUrl(ImageUrl(url: imageDataUrl))
+                GrokMessage(role: "user", content: [
+                    GrokMessagePart(type: "text", text: prompt),
+                    GrokMessagePart(type: "image_url", imageUrl: ImageUrl(url: imageDataUrl))
                 ])
             ],
-            model: "grok-4-fast",  // Fast Grok 4 model
-            stream: false,
-            temperature: 0.7
+            attachments: nil,
+            stream: false
         )
 
         let result = await withCheckedContinuation { (cont: CheckedContinuation<Result<AnnotatedContext, Error>, Never>) in

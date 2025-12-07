@@ -57,20 +57,40 @@ enum ContentPart: Codable {
     }
 }
 
-// MARK: - Chat Message
+// MARK: - Grok Message Part
 
-struct ChatMessage: Codable {
-    let role: String
-    let content: [ContentPart]
+struct GrokMessagePart: Codable {
+    let type: String
+    let text: String?
+    let imageUrl: ImageUrl?
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case text
+        case imageUrl = "image_url"
+    }
+
+    init(type: String, text: String? = nil, imageUrl: ImageUrl? = nil) {
+        self.type = type
+        self.text = text
+        self.imageUrl = imageUrl
+    }
 }
 
-// MARK: - Chat Request
+// MARK: - Grok Message
 
-struct ChatRequest: Codable {
-    let messages: [ChatMessage]
+struct GrokMessage: Codable {
+    let role: String
+    let content: [GrokMessagePart]
+}
+
+// MARK: - Grok Request
+
+struct GrokRequest: Codable {
     let model: String
+    let messages: [GrokMessage]
+    let attachments: [String]?
     let stream: Bool
-    let temperature: Double
 }
 
 // MARK: - Grok Client
@@ -98,7 +118,7 @@ final class GrokClient {
         }
     }
 
-    func createResponse(_ payload: ChatRequest, completion: @escaping (Result<Data, Error>) -> Void) {
+    func createResponse(_ payload: GrokRequest, completion: @escaping (Result<Data, Error>) -> Void) {
         // Validate API key before making request
         if apiKey.isEmpty {
             Logger.shared.log(.annotator, "❌ ERROR: Cannot make Grok API request - API key is EMPTY")
@@ -111,7 +131,7 @@ final class GrokClient {
             completion(.failure(error))
             return
         }
-        
+
         guard let url = URL(string: "https://api.x.ai/v1/chat/completions") else {
             completion(.failure(NSError(domain: "grok", code: -1, userInfo: [NSLocalizedDescriptionKey: "Bad URL"])))
             return
@@ -121,7 +141,7 @@ final class GrokClient {
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
         request.addValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        
+
         // Log headers for debugging (without exposing full key)
         Logger.shared.log(.annotator, "Request headers: Content-Type=application/json, Authorization=Bearer \(apiKey.prefix(10))...")
 
@@ -134,8 +154,7 @@ final class GrokClient {
             // Log summary without the massive base64 image
             let hasImage = payload.messages.contains { message in
                 message.content.contains { part in
-                    if case .imageUrl = part { return true }
-                    return false
+                    part.imageUrl != nil
                 }
             }
             Logger.shared.log(.annotator, "Sending Grok request: model=\(payload.model), messages=\(payload.messages.count), hasImage=\(hasImage), size=\(jsonData.count / 1024)KB")

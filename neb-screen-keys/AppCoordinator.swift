@@ -20,13 +20,8 @@ final class AppCoordinator {
     private let executor: ExecutorService
     private let nebula: NebulaClient
     private let grok: GrokClient
-    private var chatHistory: [GrokMessage] = []
-
-    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
-        let grokClient = GrokClient(apiKey: grokApiKey)
     private let executionAgent: ExecutionAgent
+    private var chatHistory: [GrokMessage] = []
 
     // MARK: - Producer Flow State
     private var lastScreenCaptureTime: Date?
@@ -35,24 +30,22 @@ final class AppCoordinator {
     private var nebulaConsumerTask: Task<Void, Never>?
     private var executionConsumerTask: Task<Void, Never>?
 
-    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "xai-UzAW09X990AA2mTaseOcfIGJT4TO6D4nfYCIpIZVXljlI4oJeWlkNh5KJjxG4yZt3nZR80CPt6TWirJx",
-         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "neb_UNUd5XVnQiPsqWODudTIEg==.dbj0j47j59jKf_eDg6KyBgyS_JIGagKaUfNAziDkkvI=",
-         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "aec926de-022c-47ac-8ae3-ddcd7febf68c"){
-        
+    init(grokApiKey: String = ProcessInfo.processInfo.environment["GROK_API_KEY"] ?? "",
+         nebulaApiKey: String = ProcessInfo.processInfo.environment["NEBULA_API_KEY"] ?? "",
+         nebulaCollection: String = ProcessInfo.processInfo.environment["NEBULA_COLLECTION_ID"] ?? "") {
+
         // Log environment variable status for debugging
         Logger.shared.log(.system, "AppCoordinator initialization:")
         Logger.shared.log(.system, "  GROK_API_KEY: \(grokApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(grokApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_API_KEY: \(nebulaApiKey.isEmpty ? "❌ MISSING" : "✓ Present (\(nebulaApiKey.prefix(10))...)")")
         Logger.shared.log(.system, "  NEBULA_COLLECTION_ID: \(nebulaCollection.isEmpty ? "❌ MISSING" : "✓ Present")")
-        
-        let grok = GrokClient(apiKey: grokApiKey)
+
+        let grokClient = GrokClient(apiKey: grokApiKey)
         let nebulaClient = NebulaClient(apiKey: nebulaApiKey, collectionId: nebulaCollection)
         self.grok = grokClient
         self.nebula = nebulaClient
         self.annotator = AnnotatorService(grok: grokClient, capture: captureService)
         self.executor = ExecutorService(grok: grokClient, nebula: nebulaClient)
-        self.annotator = AnnotatorService(grok: grok, capture: captureService)
-        self.executor = ExecutorService(grok: grok, nebula: nebulaClient)
         self.executionAgent = ExecutionAgent(stateStore: stateStore, overlay: overlay, executor: executor)
 
         overlay.onAccept = { [weak self] in self?.executeCurrentTask() }
